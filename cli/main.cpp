@@ -27,6 +27,33 @@ namespace {
 #define SYRAX_SOURCE_DIR ""
 #endif
 
+// Abreviaturas. Una letra para lo que se teclea a diario; banderas largas
+// para lo meta (--version, --help).
+struct Alias {
+    std::string_view from;
+    std::string_view to;
+};
+
+constexpr Alias kAliases[] = {
+    {"n", "new"},
+    {"b", "build"},
+    {"s", "serve"},
+    {"m", "migrate"},
+    {"m:r", "migrate:rollback"},   {"rollback", "migrate:rollback"},
+    {"m:s", "migrate:status"},     {"status", "migrate:status"},
+    {"seed", "db:seed"},           {"db:s", "db:seed"},
+    {"u", "upgrade"},              {"-u", "upgrade"},      {"--upgrade", "upgrade"},
+    {"v", "version"},              {"-v", "version"},      {"--version", "version"},
+    {"h", "help"},                 {"-h", "help"},         {"--help", "help"},
+};
+
+std::string canonical(const std::string& cmd) {
+    for (const auto& alias : kAliases) {
+        if (cmd == alias.from) return std::string{alias.to};
+    }
+    return cmd;
+}
+
 constexpr std::string_view kDefaultRepo = "https://github.com/KeevDev/Syrax.git";
 constexpr std::string_view kDefaultTag  = "main";
 
@@ -331,15 +358,18 @@ int usage() {
         "syrax " SYRAX_VERSION "\n"
         "\n"
         "uso:\n"
-        "  syrax new <nombre> [--db postgres|sqlite]   crea un proyecto\n"
-        "  syrax build                                 configura y compila\n"
-        "  syrax migrate                               aplica las migraciones pendientes\n"
-        "  syrax migrate:rollback                      revierte la ultima\n"
-        "  syrax migrate:status                        muestra cuales estan aplicadas\n"
-        "  syrax db:seed                               carga database/seeders/*.sql\n"
-        "  syrax serve [--port N]                      compila y levanta (default 8080)\n"
-        "  syrax upgrade                               recompila e instala la ultima version\n"
-        "  syrax version                               muestra la version\n"
+        "  new <nombre> [--db postgres|sqlite]   n    crea un proyecto\n"
+        "  build                                 b    configura y compila\n"
+        "  serve [--port N]                      s    compila y levanta (default 8080)\n"
+        "\n"
+        "  migrate                               m    aplica las migraciones pendientes\n"
+        "  migrate:rollback                      m:r  revierte la ultima\n"
+        "  migrate:status                        m:s  muestra cuales estan aplicadas\n"
+        "  db:seed                               seed carga database/seeders/*.sql\n"
+        "\n"
+        "  upgrade                               -u   recompila e instala la ultima version\n"
+        "  version                               -v   muestra la version\n"
+        "  help                                  -h   esta ayuda\n"
         "\n"
         "Sin --db, `new` pregunta el motor si hay terminal interactiva.\n"
         "\n"
@@ -355,7 +385,7 @@ int main(int argc, char** argv) {
     const std::vector<std::string> args(argv + 1, argv + argc);
     if (args.empty()) return usage();
 
-    const auto& cmd = args[0];
+    const auto cmd = canonical(args[0]);
 
     if (cmd == "new") {
         std::string name;
@@ -363,11 +393,11 @@ int main(int argc, char** argv) {
         bool        engineGiven = false;
 
         for (std::size_t i = 1; i < args.size(); ++i) {
-            if (args[i] == "--db" && i + 1 < args.size()) {
+            if ((args[i] == "--db" || args[i] == "-d") && i + 1 < args.size()) {
                 const auto& value = args[++i];
                 if (value == "sqlite" || value == "sqlite3") {
                     engine = tpl::Engine::Sqlite;
-                } else if (value == "postgres" || value == "postgresql") {
+                } else if (value == "postgres" || value == "postgresql" || value == "pg") {
                     engine = tpl::Engine::Postgres;
                 } else {
                     std::cerr << "error: --db acepta 'postgres' o 'sqlite', no '"
@@ -382,11 +412,13 @@ int main(int argc, char** argv) {
         return cmdNew(name, engine, engineGiven);
     }
 
-    if (cmd == "build") return cmdBuild();
+    if (cmd == "build")            return cmdBuild();
     if (cmd == "migrate")          return cmdMigrate("migrate");
     if (cmd == "migrate:rollback") return cmdMigrate("migrate:rollback");
     if (cmd == "migrate:status")   return cmdMigrate("migrate:status");
-    if (cmd == "db:seed" || cmd == "seed") return cmdSeed();
+    if (cmd == "db:seed")          return cmdSeed();
+    if (cmd == "upgrade")          return cmdUpgrade();
+    if (cmd == "help")             return usage();
 
     if (cmd == "serve") {
         std::string port = "8080";
@@ -396,9 +428,7 @@ int main(int argc, char** argv) {
         return cmdServe(port);
     }
 
-    if (cmd == "upgrade") return cmdUpgrade();
-
-    if (cmd == "version" || cmd == "--version" || cmd == "-v") {
+    if (cmd == "version") {
         std::cout << "syrax " SYRAX_VERSION "  (build " __DATE__ ")\n";
 
         const std::string source = SYRAX_SOURCE_DIR;
@@ -407,9 +437,8 @@ int main(int argc, char** argv) {
         std::cout << "actualizar con: syrax upgrade\n";
         return 0;
     }
-    if (cmd == "help" || cmd == "--help" || cmd == "-h") return usage();
 
-    std::cerr << "error: comando desconocido '" << cmd << "'\n\n";
+    std::cerr << "error: comando desconocido '" << args[0] << "'\n\n";
     usage();
     return 1;
 }

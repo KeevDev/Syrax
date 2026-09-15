@@ -35,7 +35,7 @@ FetchContent_Declare(glaze
 set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(BUILD_CTL      OFF CACHE BOOL "" FORCE)
 set(BUILD_TESTING  OFF CACHE BOOL "" FORCE)
-set(BUILD_ORM      OFF CACHE BOOL "" FORCE)
+set(BUILD_ORM      ON  CACHE BOOL "" FORCE)  # DbClient y corrutinas de BD
 FetchContent_Declare(drogon
     GIT_REPOSITORY https://github.com/drogonframework/drogon.git
     GIT_TAG        v1.9.13

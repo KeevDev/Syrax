@@ -15,6 +15,11 @@
 
 namespace syrax {
 
+// Un handler asincrono devuelve Task<Result<T>>. Es un alias de drogon::Task
+// para que el codigo de aplicacion no tenga que nombrar a Drogon.
+template <typename T>
+using Task = drogon::Task<T>;
+
 namespace detail {
 
 using Callback = std::function<void(const drogon::HttpResponsePtr&)>;
@@ -29,6 +34,24 @@ concept BodyLike = std::is_class_v<T> && !std::is_same_v<T, std::string>;
 // default-construidos. Para una API eso es inaceptable: un body sin "email"
 // no es un body valido.
 inline constexpr glz::opts kStrict{.error_on_missing_keys = true};
+
+// Un handler puede devolver Result<T> (sincrono) o Task<Result<T>>
+// (corrutina). Lo segundo es lo que permite hacer I/O de base de datos sin
+// bloquear el event loop.
+template <typename T>
+struct IsTask : std::false_type {};
+
+template <typename T>
+struct IsTask<drogon::Task<T>> : std::true_type {};
+
+template <typename T>
+inline constexpr bool kIsTask = IsTask<std::remove_cvref_t<T>>::value;
+
+template <typename... Params>
+bool allPresent(const std::tuple<std::optional<Params>...>& params) {
+    // Con cero params el fold sobre pack vacio da true.
+    return std::apply([](const auto&... o) { return (o.has_value() && ...); }, params);
+}
 
 // Un `&&` en una condicion de `if constexpr` NO protege a sus operandos de
 // instanciarse: `tuple_element_t<N - 1, T>` con N == 0 desborda a SIZE_MAX y
@@ -156,61 +179,111 @@ private:
     template <typename Body, typename F, typename... Params>
     void registerWithBody(const std::string& path, F f, drogon::HttpMethod method,
                           int okStatus, std::tuple<Params...>*) {
-        drogon::app().registerHandler(
-            path,
-            [f, okStatus](const drogon::HttpRequestPtr& req, detail::Callback&& cb,
-                          detail::AsString<Params>... raws) {
-                std::tuple<std::optional<Params>...> params{
-                    detail::convertParam<Params>(raws)...};
+        using Ret = typename detail::fn_traits<F>::result;
 
-                // Con cero params el fold sobre pack vacio da true.
-                const bool paramsOk = std::apply(
-                    [](const auto&... o) { return (o.has_value() && ...); }, params);
-                if (!paramsOk) {
-                    cb(detail::makeError(400, "invalid path parameter"));
-                    return;
-                }
+        if constexpr (detail::kIsTask<Ret>) {
+            drogon::app().registerHandler(
+                path,
+                [f, okStatus](const drogon::HttpRequestPtr& req, detail::Callback cb,
+                              detail::AsString<Params>... raws) -> drogon::Task<void> {
+                    std::tuple<std::optional<Params>...> params{
+                        detail::convertParam<Params>(raws)...};
 
-                Body        body{};
-                std::string rawBody{req->getBody()};
-                if (auto ec = glz::read<detail::kStrict>(body, rawBody)) {
-                    cb(detail::makeError(422, glz::format_error(ec, rawBody)));
-                    return;
-                }
+                    if (!detail::allPresent(params)) {
+                        cb(detail::makeError(400, "invalid path parameter"));
+                        co_return;
+                    }
 
-                detail::respond(cb,
-                                std::apply(
-                                    [&f, &body](const auto&... o) {
-                                        return f(*o..., std::move(body));
-                                    },
-                                    params),
-                                okStatus);
-            },
-            {method});
+                    Body        body{};
+                    std::string rawBody{req->getBody()};
+                    if (auto ec = glz::read<detail::kStrict>(body, rawBody)) {
+                        cb(detail::makeError(422, glz::format_error(ec, rawBody)));
+                        co_return;
+                    }
+
+                    auto result = co_await std::apply(
+                        [&f, &body](const auto&... o) { return f(*o..., std::move(body)); },
+                        params);
+                    detail::respond(cb, result, okStatus);
+                    co_return;
+                },
+                {method});
+        } else {
+            drogon::app().registerHandler(
+                path,
+                [f, okStatus](const drogon::HttpRequestPtr& req, detail::Callback&& cb,
+                              detail::AsString<Params>... raws) {
+                    std::tuple<std::optional<Params>...> params{
+                        detail::convertParam<Params>(raws)...};
+
+                    if (!detail::allPresent(params)) {
+                        cb(detail::makeError(400, "invalid path parameter"));
+                        return;
+                    }
+
+                    Body        body{};
+                    std::string rawBody{req->getBody()};
+                    if (auto ec = glz::read<detail::kStrict>(body, rawBody)) {
+                        cb(detail::makeError(422, glz::format_error(ec, rawBody)));
+                        return;
+                    }
+
+                    detail::respond(cb,
+                                    std::apply(
+                                        [&f, &body](const auto&... o) {
+                                            return f(*o..., std::move(body));
+                                        },
+                                        params),
+                                    okStatus);
+                },
+                {method});
+        }
     }
 
-    // GET/DELETE: los argumentos salen de los path params, convertidos por Drogon.
+    // Solo path params, sin body.
     template <typename F, typename... Args>
     void registerParams(const std::string& path, F f, drogon::HttpMethod method,
                         int okStatus, std::tuple<Args...>*) {
-        drogon::app().registerHandler(
-            path,
-            [f, okStatus](const drogon::HttpRequestPtr& req, detail::Callback&& cb,
-                          detail::AsString<Args>... raws) {
-                std::tuple<std::optional<Args>...> conv{detail::convertParam<Args>(raws)...};
+        using Ret = typename detail::fn_traits<F>::result;
 
-                const bool allOk = std::apply(
-                    [](const auto&... o) { return (o.has_value() && ...); }, conv);
-                if (!allOk) {
-                    cb(detail::makeError(400, "invalid path parameter"));
-                    return;
-                }
+        if constexpr (detail::kIsTask<Ret>) {
+            drogon::app().registerHandler(
+                path,
+                [f, okStatus](const drogon::HttpRequestPtr& req, detail::Callback cb,
+                              detail::AsString<Args>... raws) -> drogon::Task<void> {
+                    std::tuple<std::optional<Args>...> conv{
+                        detail::convertParam<Args>(raws)...};
 
-                detail::respond(
-                    cb, std::apply([&f](const auto&... o) { return f(*o...); }, conv),
-                    okStatus);
-            },
-            {method});
+                    if (!detail::allPresent(conv)) {
+                        cb(detail::makeError(400, "invalid path parameter"));
+                        co_return;
+                    }
+
+                    auto result = co_await std::apply(
+                        [&f](const auto&... o) { return f(*o...); }, conv);
+                    detail::respond(cb, result, okStatus);
+                    co_return;
+                },
+                {method});
+        } else {
+            drogon::app().registerHandler(
+                path,
+                [f, okStatus](const drogon::HttpRequestPtr& req, detail::Callback&& cb,
+                              detail::AsString<Args>... raws) {
+                    std::tuple<std::optional<Args>...> conv{
+                        detail::convertParam<Args>(raws)...};
+
+                    if (!detail::allPresent(conv)) {
+                        cb(detail::makeError(400, "invalid path parameter"));
+                        return;
+                    }
+
+                    detail::respond(
+                        cb, std::apply([&f](const auto&... o) { return f(*o...); }, conv),
+                        okStatus);
+                },
+                {method});
+        }
     }
 };
 

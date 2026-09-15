@@ -42,6 +42,7 @@ constexpr Alias kAliases[] = {
     {"m:r", "migrate:rollback"},   {"rollback", "migrate:rollback"},
     {"m:s", "migrate:status"},     {"status", "migrate:status"},
     {"seed", "db:seed"},           {"db:s", "db:seed"},
+    {"t", "test"},
     {"u", "upgrade"},              {"-u", "upgrade"},      {"--upgrade", "upgrade"},
     {"v", "version"},              {"-v", "version"},      {"--version", "version"},
     {"h", "help"},                 {"-h", "help"},         {"--help", "help"},
@@ -348,6 +349,11 @@ int cmdMigrate(const std::string& sub) {
     return run("./" + bin.string() + " " + sub);
 }
 
+int cmdTest() {
+    if (const int rc = cmdBuild(); rc != 0) return rc;
+    return run("ctest --test-dir build --output-on-failure");
+}
+
 int cmdSeed() {
     if (!inProject()) return 1;
     return runSqlDir("database/seeders", "cargando seeders");
@@ -366,6 +372,7 @@ int usage() {
         "  migrate:rollback                      m:r  revierte la ultima\n"
         "  migrate:status                        m:s  muestra cuales estan aplicadas\n"
         "  db:seed                               seed carga database/seeders/*.sql\n"
+        "  test                                  t    compila y corre los tests\n"
         "\n"
         "  upgrade                               -u   recompila e instala la ultima version\n"
         "  version                               -v   muestra la version\n"
@@ -417,6 +424,7 @@ int main(int argc, char** argv) {
     if (cmd == "migrate:rollback") return cmdMigrate("migrate:rollback");
     if (cmd == "migrate:status")   return cmdMigrate("migrate:status");
     if (cmd == "db:seed")          return cmdSeed();
+    if (cmd == "test")             return cmdTest();
     if (cmd == "upgrade")          return cmdUpgrade();
     if (cmd == "help")             return usage();
 

@@ -293,6 +293,19 @@ donde mueren los frameworks.
 
 ---
 
+## Tests
+
+```bash
+syrax test              # compila y corre la suite
+ctest --test-dir build  # equivalente
+```
+
+40 casos cubriendo el generador de DDL (ambos dialectos), el mapeo de filas a
+structs, la generacion de OpenAPI y la integracion HTTP completa: ruteo,
+binding de body, errores de validacion, path params y handlers corrutina.
+
+---
+
 ## Roadmap
 
 Cada milestone es útil y publicable solo. Si el proyecto se abandona en cualquier punto, lo hecho

@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Drogon necesita GCC 14+ para el C++23 que usa Syrax.
+      - name: Instalar dependencias
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            g++-14 cmake ninja-build \
+            libjsoncpp-dev uuid-dev zlib1g-dev libssl-dev \
+            libpq-dev libsqlite3-dev libc-ares-dev libbrotli-dev
+
+      - name: Configurar
+        env:
+          CXX: g++-14
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Compilar
+        run: cmake --build build
+
+      - name: Tests
+        run: ctest --test-dir build --output-on-failure
+
+      - name: El CLI arranca
+        run: ./build/cli/syrax version

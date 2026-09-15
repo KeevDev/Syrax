@@ -10,6 +10,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # build del CLI ni del ejemplo.
 option(SYRAX_BUILD_EXAMPLES "Build the example app" ${PROJECT_IS_TOP_LEVEL})
 option(SYRAX_BUILD_CLI      "Build the syrax CLI"   ${PROJECT_IS_TOP_LEVEL})
+option(SYRAX_BUILD_TESTS    "Build the test suite"  ${PROJECT_IS_TOP_LEVEL})
 
 # El CLI no enlaza contra la libreria: solo genera proyectos e invoca cmake.
 # Apagar SYRAX_BUILD_LIB evita descargar y compilar Drogon por completo, que
@@ -64,4 +65,9 @@ endif()
 
 if(SYRAX_BUILD_EXAMPLES)
     add_subdirectory(example)
+endif()
+
+if(SYRAX_BUILD_TESTS AND SYRAX_BUILD_LIB)
+    enable_testing()
+    add_subdirectory(tests)
 endif()

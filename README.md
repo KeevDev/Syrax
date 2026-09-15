@@ -396,6 +396,14 @@ Y el documento se puede sacar sin levantar el servidor, para volcarlo en CI o ge
 const auto spec = app.openApi();   // lo mismo que sirve /openapi.json
 ```
 
+### Recarga al guardar
+
+`syrax serve` se queda de padre del servidor y vigila `src/` y `database/`. Guardas un `.cpp` y recompila y vuelve a levantar solo; `r` lo fuerza a mano y `q` sale.
+
+**Si no compila, el servidor anterior sigue vivo.** Quedarte sin servidor justo cuando acabas de romper el código es lo contrario de lo que quieres: verás el error del compilador y el binario de antes seguirá respondiendo hasta que arregles.
+
+Sin terminal interactiva —un contenedor, CI, una tubería— no hay teclado que escuchar y se comporta como siempre. `--no-watch` apaga la vigilancia.
+
 ### Puerto y configuración
 
 El puerto se resuelve igual que las credenciales, de más a menos prioridad:
@@ -529,7 +537,7 @@ Ninguno de esos nombres los conoce el framework: son archivos C++ normales. Ren�
 |---|---|---|
 | `syrax new <nombre>` | `n` | crea un proyecto (`--db postgres\|sqlite`) |
 | `syrax build` | `b` | configura y compila |
-| `syrax serve` | `s` | compila y levanta (`--port N`) |
+| `syrax serve` | `s` | levanta y **recompila al guardar** (`--port N`, `--no-watch`) |
 | `syrax migrate` | `m` | aplica las migraciones pendientes |
 | `syrax migrate:rollback` | `m:r` | revierte la última |
 | `syrax migrate:status` | `m:s` | muestra cuáles están aplicadas |

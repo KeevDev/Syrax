@@ -6,10 +6,13 @@
 #include "templates.hpp"
 
 #include <fcntl.h>
+#include <poll.h>
+#include <sys/inotify.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
 
+#include <chrono>
 #include <csignal>
 #include <cstdlib>
 #include <filesystem>
@@ -370,12 +373,95 @@ void stopServer(pid_t pid) {
     ::waitpid(pid, nullptr, 0);
 }
 
-int serveWithReload(const std::string& bin, const std::string& port) {
+// inotify no es recursivo: hay que registrar cada directorio, y volver a
+// hacerlo cuando aparecen nuevos. Registrar dos veces el mismo no duplica
+// nada —devuelve el mismo descriptor de vigilancia—, asi que se puede
+// reescanear sin llevar la cuenta.
+void addWatches(int fd) {
+    if (fd < 0) return;
+
+    constexpr std::uint32_t kMask = IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE;
+
+    ::inotify_add_watch(fd, ".", kMask);   // por el CMakeLists de la raiz
+
+    for (const char* root : {"src", "database"}) {
+        if (!fs::exists(root)) continue;
+
+        ::inotify_add_watch(fd, root, kMask);
+
+        std::error_code ec;
+        for (const auto& entry : fs::recursive_directory_iterator(root, ec)) {
+            if (entry.is_directory(ec)) ::inotify_add_watch(fd, entry.path().c_str(), kMask);
+        }
+    }
+}
+
+// Un editor guarda de muchas formas —escribir en el sitio, o escribir un
+// temporal y renombrarlo—, y ademas toca archivos que no compilan nada.
+bool looksLikeSource(std::string_view name) {
+    for (const auto* ext : {".cpp", ".hpp", ".cc", ".h", ".hxx", ".cxx"}) {
+        if (name.ends_with(ext)) return true;
+    }
+    return name == "CMakeLists.txt";
+}
+
+// Devuelve si algo que importa cambio, y vacia la cola en cualquier caso.
+bool drainEvents(int fd) {
+    if (fd < 0) return false;
+
+    alignas(inotify_event) char buffer[4096];
+    bool                        interesa = false;
+
+    for (;;) {
+        const ssize_t got = ::read(fd, buffer, sizeof(buffer));
+        if (got <= 0) return interesa;
+
+        for (ssize_t offset = 0; offset < got;) {
+            const auto* event = reinterpret_cast<const inotify_event*>(buffer + offset);
+
+            if (event->len > 0 && looksLikeSource(event->name)) interesa = true;
+            offset += static_cast<ssize_t>(sizeof(inotify_event) + event->len);
+        }
+    }
+}
+
+int serveWithReload(const std::string& bin, const std::string& port, bool watch) {
     std::signal(SIGINT, onInterrupt);
     std::signal(SIGTERM, onInterrupt);
 
+    int inotify = -1;
+    if (watch) {
+        inotify = ::inotify_init1(IN_NONBLOCK);
+        addWatches(inotify);
+    }
+
     pid_t child = spawnServer(bin, port);
-    std::cout << "\n  r  recompila y reinicia      q  salir\n\n";
+
+    std::cout << (inotify >= 0 ? "\n  vigilando src/ y database/   "
+                               : "\n  ")
+              << "r  recompila y reinicia      q  salir\n\n";
+
+    // Recompila y cambia el binario en caliente. Devuelve el pid que toca
+    // seguir vigilando: si no compila, el de siempre.
+    const auto reload = [&](pid_t current) {
+        std::cout << "\nrecompilando...\n";
+
+        if (const int rc = cmdBuild(); rc != 0) {
+            // El servidor anterior sigue vivo: un error de compilacion no te
+            // deja sin servidor, que es justo cuando mas falta hace.
+            std::cout << "\nno compila; sigue corriendo el binario anterior.\n\n";
+            return current;
+        }
+
+        stopServer(current);
+        std::cout << "\nreiniciando...\n\n";
+        return spawnServer(bin, port);
+    };
+
+    // Un guardado dispara varios eventos, y guardar tres archivos seguidos no
+    // deberia ser tres compilaciones: se espera a que amaine.
+    using Clock = std::chrono::steady_clock;
+    std::optional<Clock::time_point> pendiente;
 
     for (;;) {
         if (gInterrupted) {
@@ -386,12 +472,33 @@ int serveWithReload(const std::string& bin, const std::string& port) {
         }
 
         // Si el servidor se cayo solo —un puerto ocupado, un fallo al
-        // arrancar— no tiene sentido seguir escuchando teclas.
+        // arrancar— no tiene sentido seguir escuchando.
         int status = 0;
         if (::waitpid(child, &status, WNOHANG) == child) {
             restoreTerminal();
             return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
         }
+
+        pollfd fds[2]  = {{STDIN_FILENO, POLLIN, 0}, {inotify, POLLIN, 0}};
+        const int nfds = inotify >= 0 ? 2 : 1;
+        ::poll(fds, static_cast<nfds_t>(nfds), 100);
+
+        if (inotify >= 0 && (fds[1].revents & POLLIN) && drainEvents(inotify)) {
+            pendiente = Clock::now() + std::chrono::milliseconds{250};
+        }
+
+        if (pendiente && Clock::now() >= *pendiente) {
+            pendiente.reset();
+            child = reload(child);
+
+            // Lo que se guardo mientras compilaba no cuenta como cambio nuevo,
+            // y los directorios recien creados hay que registrarlos.
+            drainEvents(inotify);
+            addWatches(inotify);
+            continue;
+        }
+
+        if (!(fds[0].revents & POLLIN)) continue;
 
         char          key = 0;
         const ssize_t got = ::read(STDIN_FILENO, &key, 1);
@@ -404,23 +511,15 @@ int serveWithReload(const std::string& bin, const std::string& port) {
             return 0;
         }
 
-        if (key != 'r' && key != 'R') continue;
-
-        std::cout << "\nrecompilando...\n";
-        if (const int rc = cmdBuild(); rc != 0) {
-            // El servidor anterior sigue vivo: un error de compilacion no te
-            // deja sin servidor, que es justo cuando mas falta hace.
-            std::cout << "\nno compila; sigue corriendo el binario anterior.\n\n";
-            continue;
+        if (key == 'r' || key == 'R') {
+            child = reload(child);
+            drainEvents(inotify);
+            addWatches(inotify);
         }
-
-        stopServer(child);
-        std::cout << "\nreiniciando...\n\n";
-        child = spawnServer(bin, port);
     }
 }
 
-int cmdServe(const std::string& port) {
+int cmdServe(const std::string& port, bool watch = true) {
     if (const int rc = cmdBuild(); rc != 0) return rc;
 
     const auto name = projectName();
@@ -439,7 +538,7 @@ int cmdServe(const std::string& port) {
     // escuchar: se ejecuta y se espera, como siempre.
     if (!enableRawMode()) return run("./" + bin.string() + " " + port);
 
-    return serveWithReload("./" + bin.string(), port);
+    return serveWithReload("./" + bin.string(), port, watch);
 }
 
 // Recompila e reinstala desde el checkout de origen. Si el binario se
@@ -618,7 +717,7 @@ int usage() {
         "uso:\n"
         "  new <nombre> [--db postgres|sqlite]   n    crea un proyecto\n"
         "  build                                 b    configura y compila\n"
-        "  serve [--port N]                      s    compila y levanta; r recarga, q sale\n"
+        "  serve [--port N] [--no-watch]         s    levanta y recompila al guardar; q sale\n"
         "\n"
         "  migrate                               m    aplica las migraciones pendientes\n"
         "  migrate:rollback                      m:r  revierte la ultima\n"
@@ -689,10 +788,15 @@ int main(int argc, char** argv) {
         // APP_PORT desde el .env. Pasarle un 8080 por defecto dejaba muerta
         // esa variable, porque el argumento siempre le gana al archivo.
         std::string port;
-        for (std::size_t i = 1; i + 1 < args.size(); ++i) {
-            if (args[i] == "--port" || args[i] == "-p") port = args[i + 1];
+        bool        watch = true;
+
+        for (std::size_t i = 1; i < args.size(); ++i) {
+            if ((args[i] == "--port" || args[i] == "-p") && i + 1 < args.size()) {
+                port = args[i + 1];
+            }
+            if (args[i] == "--no-watch") watch = false;
         }
-        return cmdServe(port);
+        return cmdServe(port, watch);
     }
 
     if (cmd == "version") {

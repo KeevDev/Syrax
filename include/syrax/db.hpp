@@ -290,6 +290,16 @@ public:
     // decision de negocio y no un error.
     void rollback() const { transaction_->rollback(); }
 
+    // El Transaction de Drogon ES un DbClient —hereda de el—, asi que todo lo
+    // que acepta un cliente vale aqui dentro sin una ruta aparte:
+    //
+    //   co_await Query<User>(tx.client()).where(...).exists();
+    //   co_await save(user, tx.client());
+    //
+    // Sin esto, lo unico que quedaba fuera de la transaccion era justamente el
+    // query builder, que es donde mas falta hace.
+    drogon::orm::DbClientPtr client() const { return transaction_; }
+
 private:
     std::shared_ptr<drogon::orm::Transaction> transaction_;
 };

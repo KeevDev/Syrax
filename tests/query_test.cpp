@@ -452,3 +452,49 @@ TEST_CASE("un campo enum vuelve del SELECT con su nombre", "[query][db]") {
     CHECK(releida->status == Status::Paid);
     CHECK(releida->total == 42);
 }
+
+// ---------------------------------------------------------- transacciones
+
+TEST_CASE("el builder corre dentro de una transaccion", "[query][db]") {
+    SqliteDialect dialect;
+    TempDb        db;
+
+    // Comprobar y luego insertar, las dos cosas sobre la misma transaccion:
+    // es el caso que antes obligaba a bajar a SQL a mano.
+    const auto creado = drogon::sync_wait(syrax::db::transactionOn(
+        db.get(), [](const syrax::db::Tx& tx) -> drogon::Task<std::optional<User>> {
+            const bool tomado = co_await Query<User>(tx.client())
+                                    .where(&User::email, "=", std::string{"hedy@x.com"})
+                                    .exists();
+            if (tomado) co_return std::nullopt;
+
+            User nuevo{.id = 0, .name = "hedy", .email = "hedy@x.com", .age = 30};
+            co_await syrax::save(nuevo, tx.client());
+            co_return nuevo;
+        }));
+
+    REQUIRE(creado.has_value());
+    CHECK(creado->id > 0);
+    CHECK(drogon::sync_wait(Query<User>(db.get()).count()) == 5);
+}
+
+TEST_CASE("lo que hace el builder en una transaccion se deshace con ella", "[query][db]") {
+    SqliteDialect dialect;
+    TempDb        db;
+
+    drogon::sync_wait(syrax::db::transactionOn(
+        db.get(), [](const syrax::db::Tx& tx) -> drogon::Task<void> {
+            User nuevo{.id = 0, .name = "hedy", .email = "hedy@x.com", .age = 30};
+            co_await syrax::save(nuevo, tx.client());
+
+            co_await Query<User>(tx.client()).where(&User::age, "<", 18).del();
+
+            // Abortar como decision de negocio: ni el alta ni el borrado valen.
+            tx.rollback();
+            co_return;
+        }));
+
+    CHECK(drogon::sync_wait(Query<User>(db.get()).count()) == 4);
+    CHECK(drogon::sync_wait(
+              Query<User>(db.get()).where(&User::name, "=", std::string{"linus"}).count()) == 1);
+}

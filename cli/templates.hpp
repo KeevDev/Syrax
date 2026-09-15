@@ -679,15 +679,19 @@ syrax::Task<std::optional<models::User>> createIfEmailFree(std::string name,
     co_return co_await syrax::db::transaction(
         [name = std::move(name), email = std::move(email), age](const syrax::db::Tx& tx)
             -> syrax::Task<std::optional<models::User>> {
-            const auto taken = co_await tx.findOne<models::User>(
-                "SELECT id, name, email, age FROM users WHERE email = @P1@", email);
+            // tx.client() es lo que mete al query builder dentro de la
+            // transaccion: sin eso, estas dos consultas irian por fuera y la
+            // carrera seguiria abierta.
+            const bool tomado = co_await syrax::Query<models::User>(tx.client())
+                                    .where(&models::User::email, "=", email)
+                                    .exists();
+            if (tomado) co_return std::nullopt;
 
-            if (taken) co_return std::nullopt;
-
-            co_return co_await tx.returning<models::User>(
-                "INSERT INTO users (name, email, age) VALUES (@P1@, @P2@, @P3@) "
-                "RETURNING id, name, email, age",
-                name, email, age);
+            // La clave primaria a cero es lo que le dice a save() que esto
+            // es un alta y no una actualizacion.
+            models::User nuevo{.id = 0, .name = name, .email = email, .age = age};
+            co_await syrax::save(nuevo, tx.client());
+            co_return nuevo;
         });
 }
 

@@ -197,6 +197,20 @@ co_return co_await db::transaction(
     });
 ```
 
+**El query builder también entra en la transacción.** El `Transaction` de Drogon *es* un `DbClient`, así que `tx.client()` sirve donde sea que se acepte un cliente:
+
+```cpp
+co_return co_await db::transaction(
+    [=](const db::Tx& tx) -> Task<std::optional<User>> {
+        if (co_await Query<User>(tx.client()).where(&User::email, "=", email).exists())
+            co_return std::nullopt;
+
+        User nuevo{.name = name, .email = email, .age = age};
+        co_await save(nuevo, tx.client());
+        co_return nuevo;
+    });
+```
+
 `Tx` tiene las mismas cuatro operaciones que `db`. Si el cuerpo lanza, se deshace entera antes de propagar; `tx.rollback()` aborta sin lanzar, para cuando abortar es una decisión de negocio. Es lo que usa el repositorio que genera `syrax new`.
 
 #### Query builder tipado

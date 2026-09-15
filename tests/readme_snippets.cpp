@@ -81,6 +81,19 @@ Task<void> gruposYUpdate() {
     (void)grandes; (void)cambiadas;
 }
 
+// El builder dentro de una transaccion, como en el README.
+Task<std::optional<User>> altaSiElEmailEstaLibre(std::string name, std::string email, int age) {
+    co_return co_await db::transaction(
+        [=](const db::Tx& tx) -> Task<std::optional<User>> {
+            if (co_await Query<User>(tx.client()).where(&User::email, "=", email).exists())
+                co_return std::nullopt;
+
+            User nuevo{.id = 0, .name = name, .email = email, .age = age};
+            co_await save(nuevo, tx.client());
+            co_return nuevo;
+        });
+}
+
 int main() {
     const std::string secreto = "s3cr3t0";
     App app;

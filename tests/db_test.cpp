@@ -267,3 +267,46 @@ TEST_CASE("scalar sobre una tabla vacia da el valor por defecto", "[db]") {
 
     CHECK(maximo == 0);
 }
+
+TEST_CASE("un COMMIT que falla no se traga en silencio", "[db]") {
+    TempDb db;
+    db->execSqlSync("PRAGMA foreign_keys = ON");
+    db->execSqlSync("CREATE TABLE padre (id INTEGER PRIMARY KEY)");
+    db->execSqlSync(
+        "CREATE TABLE hijo (id INTEGER PRIMARY KEY, padre_id INTEGER "
+        "REFERENCES padre(id) DEFERRABLE INITIALLY DEFERRED)");
+
+    // Una clave ajena diferida no se comprueba al INSERT: revienta en el
+    // COMMIT. Es exactamente el caso que antes respondia 201 y perdia la
+    // fila, porque el COMMIT ocurria despues de que el handler terminara.
+    // Que deja el motor despues de un COMMIT roto es asunto suyo; lo que
+    // aqui se comprueba es que el fallo llega a quien pidio la transaccion.
+    CHECK_THROWS_AS(drogon::sync_wait(syrax::db::transactionOn(
+                        db.get(), [](const syrax::db::Tx& tx) -> drogon::Task<void> {
+                            co_await tx.execute(
+                                "INSERT INTO hijo (id, padre_id) VALUES (1, 999)");
+                        })),
+                    syrax::db::CommitFailed);
+}
+
+TEST_CASE("un rollback del cuerpo no se queda esperando un COMMIT que no llega", "[db]") {
+    TempDb db;
+    db->execSqlSync("CREATE TABLE people (id INTEGER, name TEXT)");
+
+    // Drogon no invoca el callback de commit si la transaccion ya se deshizo,
+    // asi que esperarlo aqui colgaria la corrutina para siempre. Que este test
+    // termine es el test.
+    drogon::sync_wait(syrax::db::transactionOn(
+        db.get(), [](const syrax::db::Tx& tx) -> drogon::Task<void> {
+            co_await tx.execute("INSERT INTO people (id, name) VALUES (1, 'ada')");
+            tx.rollback();
+            co_return;
+        }));
+
+    const auto total = drogon::sync_wait(
+        syrax::db::transactionOn(db.get(), [](const syrax::db::Tx& tx) -> drogon::Task<std::int64_t> {
+            co_return co_await tx.scalar<std::int64_t>("SELECT count(*) FROM people");
+        }));
+
+    CHECK(total == 0);
+}

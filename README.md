@@ -213,6 +213,8 @@ co_return co_await db::transaction(
 
 `Tx` tiene las mismas cuatro operaciones que `db`. Si el cuerpo lanza, se deshace entera antes de propagar; `tx.rollback()` aborta sin lanzar, para cuando abortar es una decisión de negocio. Es lo que usa el repositorio que genera `syrax new`.
 
+**El COMMIT se espera.** Drogon confirma la transacción al destruirla, en otro hilo: si falla —un deadlock, un *serialization failure*, una clave ajena diferida— eso ocurre **después** de que tu handler devolvió el 201, y nadie se entera. Syrax espera esa confirmación y lanza `db::CommitFailed` si no llegó, así que un COMMIT roto sale por donde salen los demás errores y no como una fila que no está.
+
 #### Query builder tipado
 
 Para lo de todos los días —filtrar, ordenar, paginar, guardar— escribir el SQL a mano es repetir la lista de columnas en cuatro sitios y que una errata en `emial` la descubra producción. `Query<T>` cubre ese caso, y sólo ese. El modelo declara su tabla y ya:

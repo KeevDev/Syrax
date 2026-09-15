@@ -9,10 +9,14 @@
 
 #include <syrax/traits.hpp>
 
+#include <coroutine>
 #include <cstddef>
 #include <cstdlib>
 #include <fstream>
+#include <memory>
+#include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -249,10 +253,80 @@ drogon::Task<T> scalar(std::string sql, Args... args) {
 // peticiones simultaneas pueden ver el email libre las dos y crear el usuario
 // las dos. Con transaccion y la restriccion UNIQUE en la tabla, una gana y la
 // otra falla limpio.
+// Drogon confirma la transaccion cuando se destruye, en otro hilo, y el
+// resultado solo se sabe por callback: sin esperarlo, un COMMIT que falla
+// —un deadlock, un serialization failure, un constraint diferido— llega
+// despues de que el handler ya respondio 201.
+struct CommitFailed : std::runtime_error {
+    CommitFailed() : std::runtime_error{"syrax: la transaccion no se pudo confirmar"} {}
+};
+
+namespace detail {
+
+struct CommitState {
+    std::mutex              mutex;
+    bool                    finished = false;
+    bool                    ok       = false;
+    std::coroutine_handle<> waiter;
+};
+
+// El callback llega desde el hilo de la base: la corrutina se reanuda alli,
+// igual que ya pasa con el resultado de cualquier consulta.
+inline void settleCommit(const std::shared_ptr<CommitState>& state, bool ok) {
+    std::coroutine_handle<> waiter;
+    {
+        const std::lock_guard lock{state->mutex};
+        state->ok       = ok;
+        state->finished = true;
+        waiter          = state->waiter;
+        state->waiter   = {};
+    }
+    if (waiter) waiter.resume();
+}
+
+struct CommitAwaiter {
+    std::shared_ptr<CommitState> state;
+
+    bool await_ready() const {
+        const std::lock_guard lock{state->mutex};
+        return state->finished;
+    }
+
+    // Puede haber llegado entre el await_ready y esto: si ya esta, no se
+    // suspende, porque nadie va a volver a reanudarla.
+    bool await_suspend(std::coroutine_handle<> handle) const {
+        const std::lock_guard lock{state->mutex};
+        if (state->finished) return false;
+
+        state->waiter = handle;
+        return true;
+    }
+
+    bool await_resume() const {
+        const std::lock_guard lock{state->mutex};
+        return state->ok;
+    }
+};
+
+inline drogon::Task<void> awaitCommit(std::shared_ptr<CommitState> state) {
+    if (!co_await CommitAwaiter{std::move(state)}) throw CommitFailed{};
+}
+
+template <typename T>
+struct TaskValue;
+
+template <typename T>
+struct TaskValue<drogon::Task<T>> {
+    using type = T;
+};
+
+}  // namespace detail
+
 class Tx {
 public:
-    explicit Tx(std::shared_ptr<drogon::orm::Transaction> transaction)
-        : transaction_{std::move(transaction)} {}
+    explicit Tx(std::shared_ptr<drogon::orm::Transaction> transaction,
+                std::shared_ptr<bool> aborted = nullptr)
+        : transaction_{std::move(transaction)}, aborted_{std::move(aborted)} {}
 
     template <typename T, typename... Args>
     drogon::Task<std::vector<T>> query(std::string sql, Args... args) const {
@@ -288,7 +362,10 @@ public:
 
     // Deshace lo hecho hasta aqui sin lanzar. Util cuando abortar es una
     // decision de negocio y no un error.
-    void rollback() const { transaction_->rollback(); }
+    void rollback() const {
+        if (aborted_) *aborted_ = true;
+        transaction_->rollback();
+    }
 
     // El Transaction de Drogon ES un DbClient —hereda de el—, asi que todo lo
     // que acepta un cliente vale aqui dentro sin una ruta aparte:
@@ -302,6 +379,7 @@ public:
 
 private:
     std::shared_ptr<drogon::orm::Transaction> transaction_;
+    std::shared_ptr<bool>                     aborted_;
 };
 
 // Corre el cuerpo dentro de una transaccion.
@@ -318,14 +396,51 @@ private:
 template <typename F>
 auto transactionOn(drogon::orm::DbClientPtr on, F body)
     -> decltype(body(std::declval<const Tx&>())) {
-    auto     handle = co_await on->newTransactionCoro();
-    const Tx tx{handle};
+    using Value = typename detail::TaskValue<
+        std::remove_cvref_t<decltype(body(std::declval<const Tx&>()))>>::type;
 
-    try {
-        co_return co_await body(tx);
-    } catch (...) {
-        handle->rollback();
-        throw;
+    auto handle  = co_await on->newTransactionCoro();
+    auto aborted = std::make_shared<bool>(false);
+    auto state   = std::make_shared<detail::CommitState>();
+
+    handle->setCommitCallback([state](bool ok) { detail::settleCommit(state, ok); });
+
+    // El COMMIT lo dispara el destructor de la transaccion, asi que hay que
+    // soltar TODAS las referencias —la de Tx tambien, de ahi el bloque— antes
+    // de poder esperarlo.
+    //
+    // Tras un rollback no se espera nada: Drogon no llama al callback si la
+    // transaccion ya se deshizo, y quedarse esperandolo colgaria la corrutina.
+    if constexpr (std::is_void_v<Value>) {
+        try {
+            const Tx tx{handle, aborted};
+            co_await body(tx);
+        } catch (...) {
+            handle->rollback();
+            handle.reset();
+            throw;
+        }
+
+        handle.reset();
+        if (!*aborted) co_await detail::awaitCommit(std::move(state));
+        co_return;
+    } else {
+        // optional porque el valor no tiene por que ser construible por
+        // defecto, y tiene que sobrevivir hasta despues del COMMIT.
+        std::optional<Value> value;
+
+        try {
+            const Tx tx{handle, aborted};
+            value.emplace(co_await body(tx));
+        } catch (...) {
+            handle->rollback();
+            handle.reset();
+            throw;
+        }
+
+        handle.reset();
+        if (!*aborted) co_await detail::awaitCommit(std::move(state));
+        co_return std::move(*value);
     }
 }
 

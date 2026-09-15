@@ -410,6 +410,7 @@ Las digo aquí en vez de que las descubras tú:
 - **`Room` es de un solo proceso.** Un broadcast alcanza a las conexiones de *esta* instancia. Con varias réplicas detrás de un balanceador hace falta un bus externo, que Syrax no trae.
 - **Sin colas ni cache.** Son [no-objetivos](#no-objetivos) deliberados, no pendientes.
 - **Un proyecto generado no trae tests.** `syrax new` crea `database/factories/` pero ningún target de test ni `enable_testing()`. El framework sí está cubierto; tu proyecto tienes que montarlo tú por ahora.
+- **`ccache` solo acierta si el directorio de build es el mismo.** FetchContent deja Drogon *dentro* de `build/`, así que sus rutas de include forman parte de cada compilación: dos directorios distintos son dos entradas distintas y la caché no sirve. Borrar y rehacer `build/` en el mismo sitio sí acierta al 100%. Con `CCACHE_BASEDIR` se puede sortear, pero eso es configuración tuya, no del proyecto.
 - **Pre-1.0.** La API puede cambiar sin aviso.
 
 ## No-objetivos

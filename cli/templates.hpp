@@ -43,7 +43,17 @@ FetchContent_Declare(syrax
     GIT_REPOSITORY @REPO@
     GIT_TAG        @TAG@
 )
+# Drogon trae un trantor que declara cmake_minimum_required(3.5), y CMake 4
+# avisa de que esa compatibilidad se va. Esto le aplica un minimo de politicas
+# sin tocar su codigo; en CMake < 4 la variable no existe y se ignora. Se
+# restaura despues para que tu proyecto siga viendo sus propios avisos.
+set(_policy_min_backup "${CMAKE_POLICY_VERSION_MINIMUM}")
+set(CMAKE_POLICY_VERSION_MINIMUM 3.10)
+
 FetchContent_MakeAvailable(syrax)
+
+set(CMAKE_POLICY_VERSION_MINIMUM "${_policy_min_backup}")
+unset(_policy_min_backup)
 
 # CONFIGURE_DEPENDS hace que agregar archivos no requiera tocar este CMake:
 # cmake reescanea las fuentes en cada build.

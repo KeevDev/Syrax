@@ -59,6 +59,9 @@ logs/*
 
 inline constexpr std::string_view kEnvPostgres = R"T(DB_ENGINE=postgres
 DB_HOST=127.0.0.1
+
+# Lo usan la app Y el docker-compose. Si el puerto esta ocupado por otro
+# postgres local, cambialo aqui y los dos quedan de acuerdo.
 DB_PORT=5432
 DB_NAME=@NAME@
 DB_USER=postgres
@@ -69,19 +72,25 @@ inline constexpr std::string_view kEnvSqlite = R"T(DB_ENGINE=sqlite
 DB_FILE=app.db
 )T";
 
-inline constexpr std::string_view kCompose = R"T(services:
+inline constexpr std::string_view kCompose = R"T(# docker compose lee el .env de este directorio, asi que DB_PORT es la unica
+# fuente de verdad: la cambias ahi y la app y el contenedor quedan de acuerdo.
+#
+# Si el puerto ya esta ocupado (es comun tener varios postgres locales),
+# cambia DB_PORT en .env por uno libre. El 5432 de la derecha es el interno
+# del contenedor y no se toca.
+services:
   db:
     image: postgres:17-alpine
     environment:
-      POSTGRES_DB: @NAME@
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ${DB_NAME:-@NAME@}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
     ports:
-      - "5432:5432"
+      - "${DB_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}"]
       interval: 5s
       retries: 10
 

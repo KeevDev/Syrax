@@ -7,6 +7,8 @@
 #include <drogon/orm/Row.h>
 #include <glaze/glaze.hpp>
 
+#include <syrax/traits.hpp>
+
 #include <cstddef>
 #include <cstdlib>
 #include <fstream>
@@ -17,19 +19,6 @@
 #include <vector>
 
 namespace syrax::db {
-
-namespace detail {
-
-template <typename T>
-struct IsOptional : std::false_type {};
-
-template <typename T>
-struct IsOptional<std::optional<T>> : std::true_type {};
-
-template <typename T>
-inline constexpr bool kIsOptional = IsOptional<T>::value;
-
-}  // namespace detail
 
 // Mapea una fila de base de datos a un struct plano.
 //
@@ -56,7 +45,7 @@ T fromRow(const drogon::orm::Row& row) {
                 const auto field = row[std::string{keys[I]}];
                 if (field.isNull()) return;
 
-                if constexpr (detail::kIsOptional<Member>) {
+                if constexpr (syrax::detail::kIsOptional<Member>) {
                     member = field.template as<typename Member::value_type>();
                 } else {
                     member = field.template as<Member>();

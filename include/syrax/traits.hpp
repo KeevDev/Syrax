@@ -1,9 +1,20 @@
 #pragma once
 
+#include <optional>
 #include <tuple>
 #include <type_traits>
 
 namespace syrax::detail {
+
+template <typename T>
+struct IsOptional : std::false_type {};
+
+template <typename T>
+struct IsOptional<std::optional<T>> : std::true_type {};
+
+template <typename T>
+inline constexpr bool kIsOptional = IsOptional<T>::value;
+
 
 // Extrae tipo de retorno y tipos de argumento de cualquier callable.
 // Es la pieza que permite que el handler declare su propia firma y que

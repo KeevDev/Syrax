@@ -39,6 +39,18 @@ struct Echo {
     std::string value;
 };
 
+struct Signup {
+    std::string name;
+    std::string email;
+    int         age;
+
+    static auto rules() {
+        return syrax::rules(field(&Signup::name).notEmpty().minLen(3),
+                            field(&Signup::email).email(),
+                            field(&Signup::age).range(18, 120));
+    }
+};
+
 // Cliente HTTP minimo sobre sockets. Deliberadamente tonto: los tests no
 // deben depender del cliente de Drogon, que necesitaria su propio event loop.
 struct Response {
@@ -119,6 +131,15 @@ void ensureServer() {
 
             app.del("/things/{id}", [](std::int64_t id) -> Result<Thing> {
                 return Thing{.id = id, .name = "borrado"};
+            });
+
+            app.post("/signup", [](Signup body) -> Result<Echo> {
+                return Echo{.value = body.name};
+            });
+
+            // El mismo body con reglas, pero por el camino de corrutina.
+            app.post("/signup-async", [](Signup body) -> Task<Result<Echo>> {
+                co_return Echo{.value = body.name};
             });
 
             // Handler corrutina: camino de registro distinto al sincrono.
@@ -257,4 +278,44 @@ TEST_CASE_METHOD(ServerFixture, "el error de negocio conserva su codigo", "[http
 
     CHECK(response.status == 404);
     CHECK_THAT(response.body, ContainsSubstring("thing not found"));
+}
+
+TEST_CASE_METHOD(ServerFixture, "un body que cumple las reglas pasa", "[http][validation]") {
+    const auto response =
+        request("POST", "/signup", R"({"name":"Kevin","email":"kev@example.com","age":30})");
+
+    CHECK(response.status == 201);
+    CHECK_THAT(response.body, ContainsSubstring("Kevin"));
+}
+
+TEST_CASE_METHOD(ServerFixture, "un body invalido devuelve 422 con el detalle por campo",
+                 "[http][validation]") {
+    const auto response =
+        request("POST", "/signup", R"({"name":"ab","email":"roto","age":5})");
+
+    CHECK(response.status == 422);
+    CHECK_THAT(response.body, ContainsSubstring("validation failed"));
+
+    // Los tres campos se reportan juntos: no se corta en el primero.
+    CHECK_THAT(response.body, ContainsSubstring("\"field\":\"name\""));
+    CHECK_THAT(response.body, ContainsSubstring("\"field\":\"email\""));
+    CHECK_THAT(response.body, ContainsSubstring("\"field\":\"age\""));
+}
+
+TEST_CASE_METHOD(ServerFixture, "la validacion tambien corre en handlers corrutina",
+                 "[http][validation]") {
+    const auto response =
+        request("POST", "/signup-async", R"({"name":"ab","email":"kev@example.com","age":30})");
+
+    CHECK(response.status == 422);
+    CHECK_THAT(response.body, ContainsSubstring("\"field\":\"name\""));
+}
+
+TEST_CASE_METHOD(ServerFixture, "un campo ausente sigue siendo 422 sin lista de campos",
+                 "[http][validation]") {
+    // Falta 'age': eso lo ataja Glaze antes de que corran las reglas.
+    const auto response = request("POST", "/signup", R"({"name":"Kevin","email":"k@e.com"})");
+
+    CHECK(response.status == 422);
+    CHECK_THAT(response.body, !ContainsSubstring("validation failed"));
 }

@@ -4,6 +4,7 @@
 #include <glaze/glaze.hpp>
 
 #include <syrax/middleware.hpp>
+#include <syrax/validation.hpp>
 #include <syrax/openapi.hpp>
 #include <syrax/result.hpp>
 #include <syrax/traits.hpp>
@@ -77,6 +78,18 @@ template <typename T>
 std::string schemaOf() {
     std::string out;
     if (glz::write_json_schema<T>(out)) return {};
+
+    // Si el tipo declara reglas, sus limites entran al esquema aqui. Es el
+    // unico punto por el que pasan todos los esquemas, asi que documentar
+    // desde aca vale tanto para el OpenAPI como para el Swagger.
+    if constexpr (Validatable<T>) {
+        Json::Value  parsed;
+        Json::Reader reader;
+        if (!reader.parse(out, parsed)) return out;
+
+        annotateSchema<T>(parsed);
+        return Json::writeString(Json::StreamWriterBuilder{}, parsed);
+    }
     return out;
 }
 
@@ -174,6 +187,26 @@ inline drogon::HttpResponsePtr makeError(int status, std::string message) {
     body["error"]["message"] = std::move(message);
     auto resp = drogon::HttpResponse::newHttpJsonResponse(body);
     resp->setStatusCode(static_cast<drogon::HttpStatusCode>(status));
+    applyResponseChain(resp);
+    return resp;
+}
+
+// Un 422 de validacion lleva el detalle por campo. El `message` se mantiene
+// para que un cliente que solo lee `error.message` siga funcionando.
+inline drogon::HttpResponsePtr makeValidationError(const std::vector<FieldError>& fields) {
+    Json::Value body;
+    body["error"]["status"]  = 422;
+    body["error"]["message"] = "validation failed";
+
+    for (const auto& field : fields) {
+        Json::Value entry;
+        entry["field"]   = field.field;
+        entry["message"] = field.message;
+        body["error"]["fields"].append(std::move(entry));
+    }
+
+    auto resp = drogon::HttpResponse::newHttpJsonResponse(body);
+    resp->setStatusCode(drogon::k422UnprocessableEntity);
     applyResponseChain(resp);
     return resp;
 }
@@ -504,6 +537,11 @@ private:
                         co_return;
                     }
 
+                    if (auto invalid = validate(body); !invalid.empty()) {
+                        cb(detail::makeValidationError(invalid));
+                        co_return;
+                    }
+
                     Request request{req};
                     auto    result = co_await std::apply(
                         [&](const auto&... o) {
@@ -535,6 +573,11 @@ private:
                     std::string rawBody{req->getBody()};
                     if (auto ec = glz::read<detail::kStrict>(body, rawBody)) {
                         cb(detail::makeError(422, glz::format_error(ec, rawBody)));
+                        return;
+                    }
+
+                    if (auto invalid = validate(body); !invalid.empty()) {
+                        cb(detail::makeValidationError(invalid));
                         return;
                     }
 

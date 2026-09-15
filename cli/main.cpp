@@ -295,9 +295,27 @@ int cmdUpgrade() {
                " " + tmp + " && cd " + tmp + " && ./install.sh && rm -rf " + tmp);
 }
 
-int cmdMigrate() {
-    if (!inProject()) return 1;
-    return runSqlDir("database/migrations", "aplicando migraciones");
+// Las migraciones son C++, asi que hay que compilarlas antes de correrlas.
+// Es mas lento que ejecutar .sql sueltos, pero a cambio el schema builder
+// valida en tiempo de compilacion y el mismo codigo sirve para postgres y
+// sqlite.
+int cmdMigrate(const std::string& sub) {
+    if (const int rc = cmdBuild(); rc != 0) return rc;
+
+    const auto name = projectName();
+    if (name.empty()) {
+        std::cerr << "error: no pude leer project(...) de CMakeLists.txt\n";
+        return 1;
+    }
+
+    const fs::path bin = fs::path("build") / name;
+    if (!fs::exists(bin)) {
+        std::cerr << "error: no encontre el binario en " << bin << "\n";
+        return 1;
+    }
+
+    std::cout << "\n" << sub << "\n";
+    return run("./" + bin.string() + " " + sub);
 }
 
 int cmdSeed() {
@@ -312,7 +330,9 @@ int usage() {
         "uso:\n"
         "  syrax new <nombre> [--db postgres|sqlite]   crea un proyecto\n"
         "  syrax build                                 configura y compila\n"
-        "  syrax migrate                               aplica database/migrations/*.sql\n"
+        "  syrax migrate                               aplica las migraciones pendientes\n"
+        "  syrax migrate:rollback                      revierte la ultima\n"
+        "  syrax migrate:status                        muestra cuales estan aplicadas\n"
         "  syrax db:seed                               carga database/seeders/*.sql\n"
         "  syrax serve [--port N]                      compila y levanta (default 8080)\n"
         "  syrax upgrade                               recompila e instala la ultima version\n"
@@ -360,7 +380,9 @@ int main(int argc, char** argv) {
     }
 
     if (cmd == "build") return cmdBuild();
-    if (cmd == "migrate") return cmdMigrate();
+    if (cmd == "migrate")          return cmdMigrate("migrate");
+    if (cmd == "migrate:rollback") return cmdMigrate("migrate:rollback");
+    if (cmd == "migrate:status")   return cmdMigrate("migrate:status");
     if (cmd == "db:seed" || cmd == "seed") return cmdSeed();
 
     if (cmd == "serve") {

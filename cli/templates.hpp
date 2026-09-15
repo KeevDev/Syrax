@@ -38,7 +38,9 @@ FetchContent_MakeAvailable(syrax)
 
 # CONFIGURE_DEPENDS hace que agregar archivos no requiera tocar este CMake:
 # cmake reescanea las fuentes en cada build.
-file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
+file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS
+     ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp
+     ${CMAKE_CURRENT_SOURCE_DIR}/database/*.cpp)
 
 add_executable(@NAME@ ${SOURCES})
 target_include_directories(@NAME@ PRIVATE src database)
@@ -114,6 +116,57 @@ inline constexpr std::string_view kAppConfig = R"T({
     "log": {
         "log_level": "INFO"
     }
+}
+)T";
+
+inline constexpr std::string_view kMigrationUsers = R"T(#pragma once
+
+#include <syrax/syrax.hpp>
+
+#include <string>
+
+// Una migracion es una clase con up() y down(). El schema builder genera el
+// DDL correcto para postgres o sqlite, asi que esto no cambia si migras de
+// motor.
+struct CreateUsersTable : syrax::Migration {
+    std::string name() const override { return "001_create_users"; }
+
+    void up(syrax::Schema& schema) override {
+        schema.create("users", [](syrax::Blueprint& table) {
+            table.id();
+            table.string("name");
+            table.string("email").unique();
+            table.integer("age").defaultTo("0");
+            table.timestamps();
+        });
+    }
+
+    void down(syrax::Schema& schema) override {
+        schema.drop("users");
+    }
+};
+)T";
+
+inline constexpr std::string_view kMigrationsH = R"T(#pragma once
+
+#include <syrax/syrax.hpp>
+
+// Registra todas las migraciones del proyecto, en orden de aplicacion.
+void registerMigrations(syrax::Migrator& migrator);
+)T";
+
+inline constexpr std::string_view kMigrationsCpp = R"T(#include "migrations/migrations.hpp"
+
+#include "migrations/001_create_users.hpp"
+
+// El orden de esta lista es el orden en que se aplican. Agregar una migracion
+// son dos pasos: crear el archivo y anadir una linea aqui.
+//
+// El registro es explicito a proposito: nada de macros ni de auto-registro por
+// inicializacion estatica, cuyo orden no esta garantizado entre unidades de
+// traduccion.
+void registerMigrations(syrax::Migrator& migrator) {
+    migrator.add<CreateUsersTable>();
 }
 )T";
 
@@ -238,28 +291,52 @@ escribir ese mapeo ni generar modelos de 500 lineas.
 
 inline constexpr std::string_view kMain = R"T(#include <syrax/syrax.hpp>
 
+#include "migrations/migrations.hpp"
 #include "routes/routes.hpp"
 
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <string>
 
-int main(int argc, char** argv) {
-    const auto port = static_cast<std::uint16_t>(argc > 1 ? std::atoi(argv[1]) : 8080);
+namespace {
 
-    // Ajustes del servidor: hilos, logging, limites. Sin secretos: esto se
-    // versiona.
+int serve(std::uint16_t port) {
+    // Ajustes del servidor: hilos, logging, limites. Se versiona.
     if (std::filesystem::exists("config/app.json")) {
         drogon::app().loadConfigFile("config/app.json");
     }
 
-    // Credenciales y conexion, desde el entorno. Esto NO se versiona.
-    // Ver .env
+    // Credenciales desde .env y el entorno. NO se versiona.
     syrax::db::configureFromEnv();
 
     syrax::App app;
     registerRoutes(app);
     app.run(port);
+    return 0;
+}
+
+int migrations(const std::string& command) {
+    syrax::Migrator migrator;
+    registerMigrations(migrator);
+
+    if (command == "migrate")          return migrator.migrate();
+    if (command == "migrate:rollback") return migrator.rollback();
+    return migrator.status();
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    const std::string arg = (argc > 1) ? argv[1] : "";
+
+    if (arg == "migrate" || arg == "migrate:rollback" || arg == "migrate:status") {
+        return migrations(arg);
+    }
+
+    // Sin subcomando, el argumento es el puerto.
+    const auto port = static_cast<std::uint16_t>(arg.empty() ? 8080 : std::atoi(arg.c_str()));
+    return serve(port);
 }
 )T";
 
@@ -653,8 +730,9 @@ inline constexpr File kProjectFiles[] = {
     {".env",                                     kEnvSqlite,         Engine::Sqlite},
     {"docker-compose.yml",                       kCompose,           Engine::Postgres},
 
-    {"database/migrations/001_create_users.sql", kMigrationPostgres, Engine::Postgres},
-    {"database/migrations/001_create_users.sql", kMigrationSqlite,   Engine::Sqlite},
+    {"database/migrations/001_create_users.hpp", kMigrationUsers},
+    {"database/migrations/migrations.hpp",       kMigrationsH},
+    {"database/migrations/migrations.cpp",       kMigrationsCpp},
     {"database/seeders/001_users.sql",           kSeederPostgres,    Engine::Postgres},
     {"database/seeders/001_users.sql",           kSeederSqlite,      Engine::Sqlite},
     {"database/factories/UserFactory.hpp",       kUserFactory},

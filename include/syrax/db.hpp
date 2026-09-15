@@ -9,6 +9,7 @@
 
 #include <cstddef>
 #include <cstdlib>
+#include <fstream>
 #include <optional>
 #include <string>
 #include <type_traits>
@@ -72,6 +73,34 @@ inline std::string env(const char* key, std::string fallback) {
     return (value && *value) ? std::string{value} : std::move(fallback);
 }
 
+// Carga un archivo .env al entorno del proceso. Las variables que ya existen
+// ganan, para que el entorno real siempre pueda sobreescribir al archivo.
+//
+// No es un parser completo de dotenv: KEY=VALUE por linea, ignorando
+// comentarios y comillas envolventes. Alcanza para credenciales.
+inline void loadDotEnv(const std::string& path = ".env") {
+    std::ifstream file(path);
+    if (!file) return;
+
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.empty() || line[0] == '#') continue;
+
+        const auto eq = line.find('=');
+        if (eq == std::string::npos) continue;
+
+        const auto key   = line.substr(0, eq);
+        auto       value = line.substr(eq + 1);
+
+        if (value.size() >= 2 && (value.front() == '"' || value.front() == '\'') &&
+            value.back() == value.front()) {
+            value = value.substr(1, value.size() - 2);
+        }
+
+        ::setenv(key.c_str(), value.c_str(), /*overwrite=*/0);
+    }
+}
+
 // Configura la conexion desde variables de entorno, estilo 12-factor.
 //
 //   DB_ENGINE            postgres (default) | sqlite
@@ -81,6 +110,8 @@ inline std::string env(const char* key, std::string fallback) {
 // Gracias a esto el codigo de la aplicacion es identico con cualquier motor:
 // lo unico que cambia es el SQL.
 inline void configureFromEnv() {
+    loadDotEnv();
+
     const auto engine = env("DB_ENGINE", "postgres");
 
     if (engine == "sqlite" || engine == "sqlite3") {

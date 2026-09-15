@@ -34,7 +34,7 @@ Instala el comando `syrax` en `~/.local/bin`, sin sudo, en **unos segundos**: el
 syrax upgrade                      # actualizar despues
 ```
 
-Requiere CMake 3.25+, git y un compilador con C++23 (GCC 14+ o Clang 17+).
+Requiere CMake 3.25+, git y un compilador con C++23. La suite corre con **GCC 14** en CI; con **Clang 22** compilan la librería, los tests y el ejemplo. Versiones anteriores puede que sirvan, pero no lo he comprobado.
 
 ---
 
@@ -51,6 +51,9 @@ syrax serve
 ```
 
 ```
+$ curl localhost:8080/health
+{"status":"ok"}
+
 $ curl localhost:8080/api/v1/users
 [{"id":1,"name":"Ada Lovelace","email":"ada@example.com"}]
 ```
@@ -97,7 +100,7 @@ if (!user) co_return NotFound("user not found");
 
 Incluso las rutas inexistentes responden JSON, no la página HTML de Drogon.
 
-### Validación estructural automática
+### Validación
 
 El body se parsea en modo estricto antes de que el handler se ejecute. Si algo no cuadra, el cliente recibe un **422** y el handler nunca corre:
 
@@ -173,6 +176,8 @@ auto nuevo = co_await db::returning<User>("INSERT ... RETURNING id, name, email,
 El mapeo columna → campo lo resuelve Glaze en tiempo de compilación por nombre. **No hay que escribirlo ni generar modelos de 500 líneas.** Una columna `NULL` deja el campo en su valor por defecto; usa `std::optional` si necesitas distinguir.
 
 Conservas de Drogon el pool de conexiones, las corrutinas, las transacciones y los prepared statements. Lo que no hay es query builder ni relaciones: el SQL está a la vista.
+
+> **Un tipo que se refleja no puede vivir en un namespace anónimo.** Glaze saca los nombres de los campos a través de una variable `extern`, y un tipo sin enlace no puede nombrarse desde otra unidad de traducción. GCC lo deja pasar; **Clang lo rechaza** con `used but not defined in this translation unit`. Aplica a todo lo que Syrax serializa o mapea: bodies, resources y modelos. Ponlos en un namespace con nombre — que es donde el andamiaje los pone.
 
 ### Migraciones en C++
 
@@ -315,13 +320,17 @@ Los middlewares de Syrax **no** corren sobre sockets: operan sobre respuestas HT
 ## Estructura de un proyecto
 
 ```
+CMakeLists.txt            trae syrax por FetchContent, fijado a un tag
 config/app.json           ajustes del servidor (versionado)
 .env                      credenciales (NO versionado)
+.env.example              las mismas claves, sin valores (SI versionado)
 docker/Dockerfile         imagen multi-etapa
+docker-compose.yml        postgres, si elegiste ese motor
 public/                   estaticos
 logs/
 
 database/
+├── migrations.hpp        declara el registro
 ├── migrations.cpp        que migraciones existen y en que orden
 ├── migrations/           las migraciones
 ├── seeders/              datos de ejemplo
@@ -331,7 +340,7 @@ src/
 ├── main.cpp
 ├── bootstrap/            preparacion de la app
 ├── routes/               el mapa de la API, versionable
-│   ├── routes.cpp
+│   ├── routes.cpp        /health y el alta de cada version
 │   └── v1.cpp            rutas de /api/v1
 ├── http/                 TODO lo atado al transporte
 │   ├── controllers/User/
@@ -361,9 +370,12 @@ Ninguno de esos nombres los conoce el framework: son archivos C++ normales. Ren�
 | `syrax migrate:rollback` | `m:r` | revierte la última |
 | `syrax migrate:status` | `m:s` | muestra cuáles están aplicadas |
 | `syrax db:seed` | `seed` | carga `database/seeders/*.sql` |
-| `syrax test` | `t` | compila y corre los tests |
+| `syrax test` | `t` | compila y corre `ctest` (ver nota abajo) |
 | `syrax upgrade` | `-u` | recompila e instala la última versión |
 | `syrax version` | `-v` | versión y origen |
+| `syrax help` | `-h` | esta lista |
+
+> **`syrax test` sirve dentro del repo de Syrax.** Un proyecto recién generado no trae andamiaje de tests —ni `enable_testing()` ni un target—, así que ahí el comando compila y luego `ctest` no encuentra nada. `database/factories/` está puesto para cuando lo traiga.
 
 ---
 
@@ -374,9 +386,17 @@ syrax test                     # en el repo de Syrax
 ctest --test-dir build         # equivalente
 ```
 
-100 casos cubriendo el generador de DDL en ambos dialectos, `ALTER TABLE` ejecutado contra SQLite real, el mapeo de filas a structs, las reglas de validación y su anotación del JSON Schema, la generación de OpenAPI, JWT y hashing de contraseñas, middlewares y políticas, la integración HTTP completa (ruteo, binding de body, 422 con detalle por campo, path params, corrutinas, el 404 y el 500 en JSON) y los WebSockets hablando el protocolo a mano contra el servidor real.
+102 casos cubriendo el generador de DDL en ambos dialectos, `ALTER TABLE` ejecutado contra SQLite real, el mapeo de filas a structs, las reglas de validación y su anotación del JSON Schema, la generación de OpenAPI, JWT y hashing de contraseñas, middlewares y políticas, la integración HTTP completa (ruteo, binding de body, 422 con detalle por campo, path params, corrutinas, el 404 y el 500 en JSON) y los WebSockets hablando el protocolo a mano contra el servidor real.
 
-CI en GitHub Actions compila y corre la suite en cada push y PR.
+CI en GitHub Actions, en cada push y PR:
+
+| job | qué hace |
+|---|---|
+| `test` | compila con GCC 14 y corre la suite |
+| `clang` | lo mismo con Clang — GCC deja pasar cosas que Clang no |
+| `docker` | genera un proyecto, construye su `Dockerfile` y comprueba que la imagen arranca y responde en `/health` |
+
+> Los jobs `clang` y `docker` se añadieron en la 0.2.0 y **todavía no los he visto pasar**. Localmente sí: la librería, los tests y un proyecto generado compilan con Clang 22. El de Docker es la única forma de verificar el Dockerfile —la máquina donde se escribió no alcanza los repos de Debian desde dentro de un contenedor—, pero hasta que el CI esté verde, tómalos como intención, no como hecho.
 
 ---
 
@@ -389,6 +409,7 @@ Las digo aquí en vez de que las descubras tú:
 - **Un middleware no ve el body *tipado*.** Corre antes del parseo: alcanza los bytes crudos por `request.drogon()->getBody()`, pero no el struct ya validado. Para reglas que dependen del contenido está `rules()`.
 - **`Room` es de un solo proceso.** Un broadcast alcanza a las conexiones de *esta* instancia. Con varias réplicas detrás de un balanceador hace falta un bus externo, que Syrax no trae.
 - **Sin colas ni cache.** Son [no-objetivos](#no-objetivos) deliberados, no pendientes.
+- **Un proyecto generado no trae tests.** `syrax new` crea `database/factories/` pero ningún target de test ni `enable_testing()`. El framework sí está cubierto; tu proyecto tienes que montarlo tú por ahora.
 - **Pre-1.0.** La API puede cambiar sin aviso.
 
 ## No-objetivos
@@ -403,7 +424,7 @@ Mail                Storage / S3        Circuit breakers
 
 Syrax compone; no reemplaza. Si tu proyecto necesita algo de esto, tómalo de una librería existente.
 
-**Regla de admisión:** una feature entra sólo si hace *notablemente más fácil crear una API*, y si es superficie finita. Un schema builder es finito (12 tipos de columna por 2 dialectos). Un ORM no lo es.
+**Regla de admisión:** una feature entra sólo si hace *notablemente más fácil crear una API*, y si es superficie finita. Un schema builder es finito (11 tipos de columna por 2 dialectos). Un ORM no lo es.
 
 ---
 
@@ -413,14 +434,16 @@ Syrax compone; no reemplaza. Si tu proyecto necesita algo de esto, tómalo de un
 ┌──────────────────────────────────────────────────┐
 │  Tu aplicación                                   │
 ├──────────────────────────────────────────────────┤
-│  SYRAX  ← ~1200 lineas                           │
+│  SYRAX  ← ~2700 lineas de cabeceras              │
 │                                                  │
 │  Ruteo con deducción de tipos desde la firma     │
-│  Binding request → struct, con validación        │
+│  Binding request → struct, y reglas por campo    │
 │  Errores → respuesta JSON uniforme               │
 │  Mapeo fila de BD → struct, por reflection       │
 │  Schema builder y migraciones                    │
 │  Generación de OpenAPI                           │
+│  Middleware, JWT, políticas                      │
+│  WebSockets con broadcast                        │
 ├─────────────────────────┬────────────────────────┤
 │  GLAZE                  │  DROGON                │
 │  reflection, JSON,      │  HTTP, async,          │

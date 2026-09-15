@@ -496,19 +496,23 @@ inline constexpr std::string_view kRoutesCpp = R"T(#include "routes/routes.hpp"
 
 #include "routes/v1.hpp"
 
-namespace {
+// Con nombre, no anonimo: Glaze refleja este struct para serializarlo, y un
+// tipo sin enlace no se puede reflejar bajo clang.
+namespace health {
 
-struct Health {
+struct Status {
     std::string status;
 };
 
-}  // namespace
+}  // namespace health
 
 void registerRoutes(syrax::App& app) {
     // Fuera del versionado y sin tocar la base: lo que responde esto es
     // "el proceso esta vivo y sirviendo". Si consultara la base, una caida
     // de la base tumbaria el contenedor entero en vez de degradarlo.
-    app.get("/health", []() -> syrax::Result<Health> { return Health{.status = "ok"}; });
+    app.get("/health", []() -> syrax::Result<health::Status> {
+        return health::Status{.status = "ok"};
+    });
 
     routes::v1::register_(app);
 

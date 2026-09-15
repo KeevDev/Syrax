@@ -35,6 +35,35 @@ jobs:
       - name: El CLI arranca
         run: ./build/cli/syrax version
 
+  # GCC deja pasar cosas que clang no: un tipo reflejado en un namespace
+  # anonimo compila en uno y falla en el otro. Sin este job, el soporte de
+  # clang que promete el README se rompe sin que nadie se entere.
+  clang:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar dependencias
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang cmake ninja-build \
+            libjsoncpp-dev uuid-dev zlib1g-dev libssl-dev \
+            libpq-dev libsqlite3-dev libc-ares-dev libbrotli-dev
+          clang++ --version
+
+      - name: Configurar
+        env:
+          CXX: clang++
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Compilar
+        run: cmake --build build
+
+      - name: Tests
+        run: ctest --test-dir build --output-on-failure
+
   # El Dockerfile que genera `syrax new` se construye de verdad aqui. Es el
   # unico entorno donde se puede: la maquina de desarrollo no alcanza los
   # repos de Debian desde dentro de un contenedor.

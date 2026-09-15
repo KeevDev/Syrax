@@ -9,7 +9,11 @@
 
 using namespace syrax;
 
-namespace {
+// Los tipos que se reflejan NO pueden vivir en un namespace anonimo: Glaze
+// toma su nombre por una variable `extern` y un tipo sin enlace no puede
+// nombrarse desde otra unidad de traduccion. GCC lo deja pasar, clang lo
+// rechaza. Por eso el namespace lleva nombre.
+namespace valtest {
 
 struct CreateUser {
     std::string name;
@@ -51,7 +55,9 @@ std::optional<FieldError> find(const std::vector<FieldError>& errors, std::strin
     return std::nullopt;
 }
 
-}  // namespace
+}  // namespace valtest
+
+using namespace valtest;
 
 TEST_CASE("un cuerpo valido no produce errores", "[validation]") {
     CreateUser user{"Kevin", "kev@example.com", 30};

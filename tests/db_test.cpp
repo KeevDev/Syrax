@@ -14,7 +14,11 @@
 
 namespace fs = std::filesystem;
 
-namespace {
+// Los tipos que se reflejan NO pueden vivir en un namespace anonimo: Glaze
+// toma su nombre por una variable `extern` y un tipo sin enlace no puede
+// nombrarse desde otra unidad de traduccion. GCC lo deja pasar, clang lo
+// rechaza. Por eso el namespace lleva nombre.
+namespace dbtest {
 
 struct Person {
     std::int64_t id;
@@ -53,7 +57,9 @@ private:
     drogon::orm::DbClientPtr client_;
 };
 
-}  // namespace
+}  // namespace dbtest
+
+using namespace dbtest;
 
 TEST_CASE("fromRow mapea columnas a campos por nombre", "[db]") {
     TempDb db;

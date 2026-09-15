@@ -384,7 +384,7 @@ int usage() {
         "\n"
         "variables de entorno:\n"
         "  SYRAX_REPO   origen de syrax para proyectos nuevos (default: GitHub)\n"
-        "  SYRAX_TAG    rama o tag a usar (default: main)\n";
+        "  SYRAX_TAG    rama o tag a usar (default: v" SYRAX_VERSION ")\n";
     return 0;
 }
 

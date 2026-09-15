@@ -11,6 +11,8 @@
 #include <charconv>
 #include <cstdint>
 #include <optional>
+#include <iostream>
+#include <set>
 #include <string>
 #include <tuple>
 #include <unordered_map>
@@ -244,6 +246,12 @@ public:
         return *this;
     }
 
+    // Silencia el banner de arranque.
+    App& quiet() {
+        banner_ = false;
+        return *this;
+    }
+
     // Titulo y version que aparecen en /docs.
     App& docs(std::string title, std::string version = "1.0.0") {
         title_   = std::move(title);
@@ -267,6 +275,11 @@ public:
         // responder JSON siempre, incluso cuando el error lo genera el transporte.
         drogon::app().setCustom404Page(
             detail::makeError(404, "route not found"), /*set404=*/true);
+
+        // El banner se imprime cuando el listener ya esta arriba, no antes:
+        // si el puerto esta ocupado no tiene sentido anunciar una URL que no
+        // responde.
+        drogon::app().registerBeginningAdvice([this, port] { banner(port); });
 
         drogon::app().addListener("0.0.0.0", port).run();
     }
@@ -362,6 +375,39 @@ private:
         });
     }
 
+    // Se escribe localhost y no 0.0.0.0 para que la terminal la reconozca
+    // como enlace y se pueda abrir con click.
+    void banner(std::uint16_t port) const {
+        if (!banner_) return;
+
+        const std::string base = "http://localhost:" + std::to_string(port);
+
+        std::cout << "\n  \033[1m" << title_ << "\033[0m " << version_ << "\n\n"
+                  << "  \033[32m->\033[0m  Local:  \033[4m" << base << "/\033[0m\n";
+
+        if (docsEnabled_) {
+            std::cout << "  \033[32m->\033[0m  Docs:   \033[4m" << base << "/docs\033[0m\n"
+                      << "  \033[32m->\033[0m  Spec:   \033[4m" << base
+                      << "/openapi.json\033[0m\n";
+        }
+
+        // Prefijos distintos de las rutas registradas: si todas cuelgan de
+        // /api/v1, mostrarlo ahorra adivinar.
+        std::set<std::string> prefixes;
+        for (const auto& route : routes_) {
+            const auto second = route.path.find('/', 1);
+            if (second != std::string::npos) prefixes.insert(route.path.substr(0, second));
+        }
+        for (const auto& prefix : prefixes) {
+            if (prefix == "/docs") continue;
+            std::cout << "  \033[32m->\033[0m  API:    \033[4m" << base << prefix
+                      << "\033[0m\n";
+        }
+
+        std::cout << "\n  " << routes_.size() << " rutas.  Ctrl+C para detener.\n\n"
+                  << std::flush;
+    }
+
     void registerDocs() {
         const auto spec = buildOpenApi(routes_, title_, version_);
         const auto html = swaggerHtml(title_);
@@ -396,6 +442,7 @@ private:
     std::string            title_       = "API";
     std::string            version_     = "1.0.0";
     bool                   docsEnabled_ = true;
+    bool                   banner_      = true;
 
     template <bool AllowBody, typename F>
     App& route(const std::string& path, F&& f, drogon::HttpMethod method, int okStatus) {

@@ -56,7 +56,10 @@ std::string canonical(const std::string& cmd) {
 }
 
 constexpr std::string_view kDefaultRepo = "https://github.com/KeevDev/Syrax.git";
-constexpr std::string_view kDefaultTag  = "main";
+// Se fija una version en vez de apuntar a main: con un blanco movil, cada
+// push al framework invalida el build de todos los proyectos y recompila
+// Drogon entero. SYRAX_TAG lo sobreescribe para desarrollo.
+constexpr std::string_view kDefaultTag  = "v" SYRAX_VERSION;
 
 // ------------------------------------------------------------------ utilidades
 
@@ -306,7 +309,6 @@ int cmdServe(const std::string& port) {
         return 1;
     }
 
-    std::cout << "\nsyrax: " << bin.string() << " escuchando en :" << port << "\n\n";
     return run("./" + bin.string() + " " + port);
 }
 

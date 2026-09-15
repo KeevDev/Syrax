@@ -53,6 +53,8 @@ compile_commands.json
 uploads/
 .env
 *.db
+logs/*
+!logs/.gitkeep
 )T";
 
 inline constexpr std::string_view kEnvPostgres = R"T(DB_ENGINE=postgres
@@ -119,6 +121,95 @@ inline constexpr std::string_view kAppConfig = R"T({
 }
 )T";
 
+inline constexpr std::string_view kBootstrapH = R"T(#pragma once
+
+#include <syrax/syrax.hpp>
+
+namespace bootstrap {
+
+// Todo lo que hay que preparar antes de atender la primera peticion:
+// configuracion, base de datos, documentacion y rutas.
+//
+// Vive aparte de main.cpp porque esto crece (middleware, plugins, manejadores
+// de error) y main deberia seguir cabiendo en una pantalla.
+syrax::App create();
+
+}  // namespace bootstrap
+)T";
+
+inline constexpr std::string_view kBootstrapCpp = R"T(#include "bootstrap/app.hpp"
+
+#include "routes/routes.hpp"
+
+#include <filesystem>
+
+namespace bootstrap {
+
+syrax::App create() {
+    // Ajustes del servidor: hilos, logging, limites. Se versiona.
+    if (std::filesystem::exists("config/app.json")) {
+        drogon::app().loadConfigFile("config/app.json");
+    }
+
+    // Credenciales desde .env y el entorno. NO se versiona.
+    syrax::db::configureFromEnv();
+
+    syrax::App app;
+
+    // Titulo y version que se ven en /docs.
+    app.docs("@NAME@", "1.0.0");
+
+    registerRoutes(app);
+    return app;
+}
+
+}  // namespace bootstrap
+)T";
+
+inline constexpr std::string_view kGitkeep = R"T()T";
+
+inline constexpr std::string_view kPublicIndex = R"T(<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>@NAME@</title></head>
+<body>
+  <h1>@NAME@</h1>
+  <p>Archivos estaticos salen de esta carpeta. La API vive en <code>/api/v1</code>.</p>
+  <p><a href="/docs">Documentacion</a></p>
+</body>
+</html>
+)T";
+
+inline constexpr std::string_view kDockerfile = R"T(# Build y runtime separados: la imagen final no carga compilador ni fuentes.
+# Ambas etapas usan la misma base para que las versiones de las librerias
+# compartidas coincidan.
+FROM debian:trixie AS build
+
+RUN apt-get update && apt-get install -y --no-install-recommends         g++ cmake ninja-build git ca-certificates pkg-config         libjsoncpp-dev uuid-dev zlib1g-dev libssl-dev         libpq-dev libsqlite3-dev libc-ares-dev libbrotli-dev     && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . .
+RUN cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release     && cmake --build build
+
+FROM debian:trixie-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends         libjsoncpp26 libuuid1 zlib1g libssl3 libpq5 libsqlite3-0         libcares2 libbrotli1 ca-certificates     && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY --from=build /src/build/@NAME@ /app/@NAME@
+COPY --from=build /src/config /app/config
+COPY --from=build /src/public /app/public
+
+EXPOSE 8080
+CMD ["/app/@NAME@"]
+)T";
+
+inline constexpr std::string_view kDockerignore = R"T(build/
+.git/
+.env
+*.db
+logs/
+)T";
+
 inline constexpr std::string_view kMigrationUsers = R"T(#pragma once
 
 #include <syrax/syrax.hpp>
@@ -155,7 +246,7 @@ inline constexpr std::string_view kMigrationsH = R"T(#pragma once
 void registerMigrations(syrax::Migrator& migrator);
 )T";
 
-inline constexpr std::string_view kMigrationsCpp = R"T(#include "migrations/migrations.hpp"
+inline constexpr std::string_view kMigrationsCpp = R"T(#include "migrations.hpp"
 
 #include "migrations/001_create_users.hpp"
 
@@ -239,25 +330,31 @@ config/app.json           ajustes del servidor (versionado)
 .env                      credenciales (NO versionado)
 
 database/
-├── migrations/           esquema     -> syrax migrate
-├── seeders/              datos demo  -> syrax db:seed
+├── migrations.cpp        que migraciones existen y en que orden
+├── migrations/           las migraciones    -> syrax migrate
+├── seeders/              datos demo         -> syrax db:seed
 └── factories/            objetos de mentira para tests
 
 src/
 ├── main.cpp              arranque y conexion a la BD
-├── routes/
+├── routes/               el mapa de la API
 │   ├── routes.cpp        engancha las versiones
 │   └── v1.cpp            rutas de /api/v1
-├── controllers/User/     HTTP: recibe, delega, responde
+├── http/                 TODO lo atado al transporte
+│   ├── controllers/User/ recibe, delega, responde
+│   ├── requests/User/    lo que entra
+│   └── resources/User/   lo que sale
 ├── services/User/        logica de negocio
 ├── repositories/User/    SQL. lo unico que sabe de la BD
-├── models/User/          la forma de la tabla
-├── requests/User/        lo que entra
-└── resources/User/       lo que sale
+└── models/User/          la forma de la tabla
 ```
 
-Cada capa se subdivide por recurso (`controllers/User/`, `controllers/Order/`)
-para que con veinte entidades ninguna carpeta sea un basurero plano.
+**Por que existe `http/`:** marca un limite real. Si manana expones la misma
+logica por gRPC, esa carpeta se tira entera y `services/`, `repositories/` y
+`models/` siguen sirviendo sin tocarse.
+
+Cada capa se subdivide por recurso (`User/`, `Order/`) para que con veinte
+entidades ninguna carpeta sea un basurero plano.
 
 ## Versionar la API
 
@@ -271,12 +368,12 @@ el tipo que se serializa simplemente no lo tiene.
 
 ## Agregar un recurso
 
-1. Migracion en `migrations/`
-2. `models/Product.hpp` — un struct plano con los campos de la tabla
-3. `repositories/ProductRepository.*` — el SQL
-4. `services/ProductService.*` — las reglas
-5. `resources/ProductResource.*` y `requests/ProductRequests.hpp`
-6. `controllers/ProductController.*` y registralo en `src/routes.cpp`
+1. Migracion en `database/migrations/` y su linea en `database/migrations.cpp`
+2. `models/Product/Product.hpp` — un struct plano con los campos de la tabla
+3. `repositories/Product/ProductRepository.*` — el SQL
+4. `services/Product/ProductService.*` — las reglas
+5. `http/requests/Product/` y `http/resources/Product/`
+6. `http/controllers/Product/` y registralo en `src/routes/v1.cpp`
 
 No hay que tocar el `CMakeLists.txt`.
 
@@ -291,30 +388,14 @@ escribir ese mapeo ni generar modelos de 500 lineas.
 
 inline constexpr std::string_view kMain = R"T(#include <syrax/syrax.hpp>
 
-#include "migrations/migrations.hpp"
-#include "routes/routes.hpp"
+#include "bootstrap/app.hpp"
+#include "migrations.hpp"
 
 #include <cstdint>
 #include <cstdlib>
-#include <filesystem>
 #include <string>
 
 namespace {
-
-int serve(std::uint16_t port) {
-    // Ajustes del servidor: hilos, logging, limites. Se versiona.
-    if (std::filesystem::exists("config/app.json")) {
-        drogon::app().loadConfigFile("config/app.json");
-    }
-
-    // Credenciales desde .env y el entorno. NO se versiona.
-    syrax::db::configureFromEnv();
-
-    syrax::App app;
-    registerRoutes(app);
-    app.run(port);
-    return 0;
-}
 
 int migrations(const std::string& command) {
     syrax::Migrator migrator;
@@ -336,7 +417,10 @@ int main(int argc, char** argv) {
 
     // Sin subcomando, el argumento es el puerto.
     const auto port = static_cast<std::uint16_t>(arg.empty() ? 8080 : std::atoi(arg.c_str()));
-    return serve(port);
+
+    auto app = bootstrap::create();
+    app.run(port);
+    return 0;
 }
 )T";
 
@@ -367,7 +451,7 @@ void register_(syrax::App& app);
 
 inline constexpr std::string_view kRoutesV1Cpp = R"T(#include "routes/v1.hpp"
 
-#include "controllers/User/UserController.hpp"
+#include "http/controllers/User/UserController.hpp"
 
 namespace routes::v1 {
 
@@ -471,7 +555,7 @@ std::vector<UserResource> from(const std::vector<models::User>& users);
 }  // namespace resources
 )T";
 
-inline constexpr std::string_view kResourceUserCpp = R"T(#include "resources/User/UserResource.hpp"
+inline constexpr std::string_view kResourceUserCpp = R"T(#include "http/resources/User/UserResource.hpp"
 
 namespace resources {
 
@@ -582,7 +666,7 @@ inline constexpr std::string_view kServiceUserH = R"T(#pragma once
 #include <syrax/syrax.hpp>
 
 #include "models/User/User.hpp"
-#include "requests/User/UserRequests.hpp"
+#include "http/requests/User/UserRequests.hpp"
 
 #include <cstdint>
 #include <optional>
@@ -657,10 +741,10 @@ void routes(syrax::App& app, std::string_view prefix);
 }  // namespace controllers::user
 )T";
 
-inline constexpr std::string_view kControllerUserCpp = R"T(#include "controllers/User/UserController.hpp"
+inline constexpr std::string_view kControllerUserCpp = R"T(#include "http/controllers/User/UserController.hpp"
 
-#include "requests/User/UserRequests.hpp"
-#include "resources/User/UserResource.hpp"
+#include "http/requests/User/UserRequests.hpp"
+#include "http/resources/User/UserResource.hpp"
 #include "services/User/UserService.hpp"
 
 #include <cstdint>
@@ -730,29 +814,36 @@ inline constexpr File kProjectFiles[] = {
     {".env",                                     kEnvSqlite,         Engine::Sqlite},
     {"docker-compose.yml",                       kCompose,           Engine::Postgres},
 
+    {"database/migrations.hpp",                  kMigrationsH},
+    {"database/migrations.cpp",                  kMigrationsCpp},
     {"database/migrations/001_create_users.hpp", kMigrationUsers},
-    {"database/migrations/migrations.hpp",       kMigrationsH},
-    {"database/migrations/migrations.cpp",       kMigrationsCpp},
     {"database/seeders/001_users.sql",           kSeederPostgres,    Engine::Postgres},
     {"database/seeders/001_users.sql",           kSeederSqlite,      Engine::Sqlite},
     {"database/factories/UserFactory.hpp",       kUserFactory},
 
+    {"docker/Dockerfile",                        kDockerfile},
+    {".dockerignore",                            kDockerignore},
+    {"public/index.html",                        kPublicIndex},
+    {"logs/.gitkeep",                            kGitkeep},
+
     {"src/main.cpp",                             kMain},
+    {"src/bootstrap/app.hpp",                    kBootstrapH},
+    {"src/bootstrap/app.cpp",                    kBootstrapCpp},
     {"src/routes/routes.hpp",                    kRoutesH},
     {"src/routes/routes.cpp",                    kRoutesCpp},
     {"src/routes/v1.hpp",                        kRoutesV1H},
     {"src/routes/v1.cpp",                        kRoutesV1Cpp},
 
     {"src/models/User/User.hpp",                 kModelUser},
-    {"src/requests/User/UserRequests.hpp",       kRequestsUser},
-    {"src/resources/User/UserResource.hpp",      kResourceUserH},
-    {"src/resources/User/UserResource.cpp",      kResourceUserCpp},
+    {"src/http/requests/User/UserRequests.hpp",  kRequestsUser},
+    {"src/http/resources/User/UserResource.hpp", kResourceUserH},
+    {"src/http/resources/User/UserResource.cpp", kResourceUserCpp},
     {"src/repositories/User/UserRepository.hpp", kRepoUserH},
     {"src/repositories/User/UserRepository.cpp", kRepoUserCpp},
     {"src/services/User/UserService.hpp",        kServiceUserH},
     {"src/services/User/UserService.cpp",        kServiceUserCpp},
-    {"src/controllers/User/UserController.hpp",  kControllerUserH},
-    {"src/controllers/User/UserController.cpp",  kControllerUserCpp},
+    {"src/http/controllers/User/UserController.hpp", kControllerUserH},
+    {"src/http/controllers/User/UserController.cpp", kControllerUserCpp},
 };
 
 }  // namespace tpl

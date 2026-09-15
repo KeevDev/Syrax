@@ -3,6 +3,7 @@
 #include <drogon/drogon.h>
 #include <glaze/glaze.hpp>
 
+#include <syrax/openapi.hpp>
 #include <syrax/result.hpp>
 #include <syrax/traits.hpp>
 
@@ -11,6 +12,8 @@
 #include <optional>
 #include <string>
 #include <tuple>
+#include <unordered_map>
+#include <vector>
 #include <type_traits>
 
 namespace syrax {
@@ -46,6 +49,33 @@ struct IsTask<drogon::Task<T>> : std::true_type {};
 
 template <typename T>
 inline constexpr bool kIsTask = IsTask<std::remove_cvref_t<T>>::value;
+
+// Desenvuelve el tipo que el handler realmente devuelve:
+//   Result<User>        -> User
+//   Task<Result<User>>  -> User
+// Es lo que se necesita para sacarle el esquema a la respuesta.
+template <typename T>
+struct ResultValue;
+
+template <typename T>
+struct ResultValue<Result<T>> {
+    using type = T;
+};
+
+template <typename T>
+struct ResultValue<drogon::Task<Result<T>>> {
+    using type = T;
+};
+
+template <typename T>
+using ResultValueT = typename ResultValue<std::remove_cvref_t<T>>::type;
+
+template <typename T>
+std::string schemaOf() {
+    std::string out;
+    if (glz::write_json_schema<T>(out)) return {};
+    return out;
+}
 
 template <typename... Params>
 bool allPresent(const std::tuple<std::optional<Params>...>& params) {
@@ -146,7 +176,22 @@ public:
         return route<false>(path, std::forward<F>(f), drogon::Delete, 200);
     }
 
+    // Titulo y version que aparecen en /docs.
+    App& docs(std::string title, std::string version = "1.0.0") {
+        title_   = std::move(title);
+        version_ = std::move(version);
+        return *this;
+    }
+
+    // Apaga /docs y /openapi.json (por ejemplo, en produccion).
+    App& withoutDocs() {
+        docsEnabled_ = false;
+        return *this;
+    }
+
     void run(std::uint16_t port = 8080) {
+        if (docsEnabled_) registerDocs();
+
         // Drogon sirve una pagina HTML para rutas no encontradas. Una API debe
         // responder JSON siempre, incluso cuando el error lo genera el transporte.
         drogon::app().setCustom404Page(
@@ -156,6 +201,57 @@ public:
     }
 
 private:
+    // Los esquemas salen de los mismos tipos que usan los handlers, asi que la
+    // documentacion no puede desincronizarse del codigo.
+    void note(drogon::HttpMethod method, const std::string& path,
+              std::string requestSchema, std::string responseSchema, int okStatus) {
+        static const std::unordered_map<int, std::string> kNames{
+            {drogon::Get, "get"},     {drogon::Post, "post"},  {drogon::Put, "put"},
+            {drogon::Patch, "patch"}, {drogon::Delete, "delete"},
+        };
+
+        const auto it = kNames.find(static_cast<int>(method));
+        if (it == kNames.end()) return;
+
+        routes_.push_back(RouteInfo{
+            .method         = it->second,
+            .path           = path,
+            .requestSchema  = std::move(requestSchema),
+            .responseSchema = std::move(responseSchema),
+            .okStatus       = okStatus,
+        });
+    }
+
+    void registerDocs() {
+        const auto spec = buildOpenApi(routes_, title_, version_);
+        const auto html = swaggerHtml(title_);
+
+        drogon::app().registerHandler(
+            "/openapi.json",
+            [spec](const drogon::HttpRequestPtr&, detail::Callback&& cb) {
+                auto resp = drogon::HttpResponse::newHttpResponse();
+                resp->setContentTypeCode(drogon::CT_APPLICATION_JSON);
+                resp->setBody(spec);
+                cb(resp);
+            },
+            {drogon::Get});
+
+        drogon::app().registerHandler(
+            "/docs",
+            [html](const drogon::HttpRequestPtr&, detail::Callback&& cb) {
+                auto resp = drogon::HttpResponse::newHttpResponse();
+                resp->setContentTypeCode(drogon::CT_TEXT_HTML);
+                resp->setBody(html);
+                cb(resp);
+            },
+            {drogon::Get});
+    }
+
+    std::vector<RouteInfo> routes_;
+    std::string            title_       = "API";
+    std::string            version_     = "1.0.0";
+    bool                   docsEnabled_ = true;
+
     template <bool AllowBody, typename F>
     App& route(const std::string& path, F&& f, drogon::HttpMethod method, int okStatus) {
         using Args                 = typename detail::fn_traits<std::decay_t<F>>::args;
@@ -164,11 +260,18 @@ private:
         // Un handler puede pedir path params y body a la vez:
         //   [](int64_t id, UpdateUser body) -> Result<UserResponse>
         // El body, si lo hay, es siempre el ultimo argumento.
+        using Value = detail::ResultValueT<typename detail::fn_traits<std::decay_t<F>>::result>;
+
         if constexpr (AllowBody && detail::hasTrailingBody<Args>()) {
-            registerWithBody<std::tuple_element_t<kArity - 1, Args>>(
-                path, std::forward<F>(f), method, okStatus,
-                static_cast<detail::DropLast<Args>*>(nullptr));
+            using Body = std::tuple_element_t<kArity - 1, Args>;
+
+            note(method, path, detail::schemaOf<Body>(), detail::schemaOf<Value>(), okStatus);
+
+            registerWithBody<Body>(path, std::forward<F>(f), method, okStatus,
+                                   static_cast<detail::DropLast<Args>*>(nullptr));
         } else {
+            note(method, path, {}, detail::schemaOf<Value>(), okStatus);
+
             registerParams(path, std::forward<F>(f), method, okStatus,
                            static_cast<Args*>(nullptr));
         }

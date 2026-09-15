@@ -153,7 +153,7 @@ Tres detalles que no son accidentales:
 
 Un `std::optional<T>` ausente no se valida: "no vino" es asunto de presencia, no de contenido.
 
-### Base de datos sin ORM ni boilerplate
+### Base de datos sin modelos generados
 
 Un modelo es un struct plano:
 
@@ -175,7 +175,7 @@ auto nuevo = co_await db::returning<User>("INSERT ... RETURNING id, name, email,
 
 El mapeo columna → campo lo resuelve Glaze en tiempo de compilación por nombre. **No hay que escribirlo ni generar modelos de 500 líneas.** Una columna `NULL` deja el campo en su valor por defecto; usa `std::optional` si necesitas distinguir.
 
-Conservas de Drogon el pool de conexiones, las corrutinas y los prepared statements. Lo que no hay es query builder ni relaciones: el SQL está a la vista.
+Conservas de Drogon el pool de conexiones, las corrutinas y los prepared statements. Así escrito, el SQL está a la vista; si prefieres no repetir la lista de columnas, hay un [query builder tipado](#query-builder-tipado) sobre el mismo struct.
 
 Para un valor suelto no hace falta declarar un struct:
 
@@ -197,13 +197,65 @@ co_return co_await db::transaction(
 
 `Tx` tiene las mismas cuatro operaciones que `db`. Si el cuerpo lanza, se deshace entera antes de propagar; `tx.rollback()` aborta sin lanzar, para cuando abortar es una decisión de negocio. Es lo que usa el repositorio que genera `syrax new`.
 
+#### Query builder tipado
+
+Para lo de todos los días —filtrar, ordenar, paginar, guardar— escribir el SQL a mano es repetir la lista de columnas en cuatro sitios y que una errata en `emial` la descubra producción. `Query<T>` cubre ese caso, y sólo ese. El modelo declara su tabla y ya:
+
+```cpp
+struct User {
+    std::int64_t id;
+    std::string  name;
+    std::string  email;
+    int          age;
+
+    static constexpr auto table = "users";   // esto es todo lo que hace falta
+};
+```
+
+```cpp
+const auto adultos = co_await Query<User>()
+    .where(&User::age, ">", 18)
+    .orderBy(&User::name)
+    .limit(10)
+    .get();
+
+const auto ada   = co_await Query<User>().where(&User::email, "=", email).first();
+const auto total = co_await Query<User>().count();
+const bool hay   = co_await Query<User>().whereNotNull(&User::email).exists();
+const auto fuera = co_await Query<User>().where(&User::age, "<", 18).del();
+```
+
+También `orWhere`, `whereIn`, `whereNull`, `offset`. `toSql()` devuelve la consulta sin ejecutarla, para cuando quieras ver qué salió.
+
+Guardar y borrar objetos:
+
+```cpp
+User u{.name = "Ada", .email = "ada@x.com", .age = 36};
+co_await save(u);      // INSERT; u.id queda con el que asignó la base
+u.age = 37;
+co_await save(u);      // UPDATE, porque la clave primaria ya viene puesta
+co_await remove(u);
+```
+
+La clave primaria es `id` salvo que declares otra: `static constexpr auto primaryKey = "doc_id";`.
+
+Tres cosas que lo separan de escribir el `SELECT`:
+
+- **La columna se nombra con `&User::email`, no con un string.** Glaze resuelve el nombre en compilación comparando la dirección del miembro contra los campos que refleja, así que `&User::emial` **no compila** en vez de fallar en producción.
+- **Las columnas salen del struct.** Añadir un campo al modelo no obliga a tocar ningún `SELECT`.
+- **El dialecto lo pone Syrax.** Postgres numera los parámetros (`$1, $2`) y SQLite usa `?`; el motor sale del `.env`, así que la misma consulta vale en los dos.
+
+**Lo que no hace, a propósito: joins, relaciones, subconsultas, `GROUP BY`.** Ahí un query builder deja de tener fondo y acaba siendo un dialecto de SQL peor que SQL. Para eso `db::query` sigue donde estaba, y las dos formas conviven en el mismo repositorio —de hecho el que genera `syrax new` usa una para lo simple y la otra para lo que no lo es.
+
 #### Y si quieres `Mapper<T>`, puedes
 
 Syrax usa `orm_lib` de Drogon entero —pool, corrutinas, transacciones, prepared statements— salvo `Mapper<T>`. Pero **no te lo impide**: corre sobre el mismo `DbClient`, así que convive en el mismo proyecto y en la misma transacción.
 
 ```bash
-drogon_ctl create model models     # necesita model.json y la base viva
+syrax make:model users     # escribe model.json con lo que hay en tu .env
 ```
+
+Deja el modelo en `src/models/generated/`. La primera vez construye `drogon_ctl` desde el Drogon que ya bajó FetchContent —tarda varios minutos, pero queda cacheado en `build/_ctl/`— y necesita la base levantada, porque el esquema lo lee de ella. Por eso no se hace en `syrax new`: ahí todavía no hay base.
 
 ```cpp
 #include <drogon/orm/CoroMapper.h>
@@ -434,6 +486,7 @@ Ninguno de esos nombres los conoce el framework: son archivos C++ normales. Ren�
 | `syrax migrate:rollback` | `m:r` | revierte la última |
 | `syrax migrate:status` | `m:s` | muestra cuáles están aplicadas |
 | `syrax db:seed` | `seed` | carga `database/seeders/*.sql` |
+| `syrax make:model <tabla>` | `m:m` | genera el modelo de Drogon (`Mapper<T>`) desde la base |
 | `syrax test` | `t` | compila y corre `ctest` (ver nota abajo) |
 | `syrax upgrade` | `-u` | recompila e instala la última versión |
 | `syrax version` | `-v` | versión y origen |
@@ -450,7 +503,7 @@ syrax test                     # en el repo de Syrax
 ctest --test-dir build         # equivalente
 ```
 
-112 casos cubriendo el generador de DDL en ambos dialectos, `ALTER TABLE` ejecutado contra SQLite real, el mapeo de filas a structs, las reglas de validación y su anotación del JSON Schema, la generación de OpenAPI, JWT y hashing de contraseñas, middlewares y políticas, la integración HTTP completa (ruteo, binding de body, 422 con detalle por campo, path params, corrutinas, el 404 y el 500 en JSON) y los WebSockets hablando el protocolo a mano contra el servidor real.
+128 casos cubriendo el generador de DDL en ambos dialectos, `ALTER TABLE` ejecutado contra SQLite real, el mapeo de filas a structs, el query builder contra SQLite real —SQL generado, `save`/`remove`, paginación y el `IN ()` vacío—, las reglas de validación y su anotación del JSON Schema, la generación de OpenAPI, JWT y hashing de contraseñas, middlewares y políticas, la integración HTTP completa (ruteo, binding de body, 422 con detalle por campo, path params, corrutinas, el 404 y el 500 en JSON) y los WebSockets hablando el protocolo a mano contra el servidor real.
 
 CI en GitHub Actions, en cada push y PR:
 
@@ -480,16 +533,16 @@ Las digo aquí en vez de que las descubras tú:
 ## No-objetivos
 
 ```
-ORM propio          Colas / Jobs        Scheduler
-Query builder       Event bus           Service discovery
-Relaciones          gRPC                Load balancing
-Mail                Storage / S3        Circuit breakers
+Joins y relaciones  Colas / Jobs        Scheduler
+Lazy / eager load   Event bus           Service discovery
+Mail                gRPC                Load balancing
+                    Storage / S3        Circuit breakers
                     Cache distribuida   Broker de sockets
 ```
 
 Syrax compone; no reemplaza. Si tu proyecto necesita algo de esto, tómalo de una librería existente.
 
-**Regla de admisión:** una feature entra sólo si hace *notablemente más fácil crear una API*, y si es superficie finita. Un schema builder es finito (11 tipos de columna por 2 dialectos). Un ORM no lo es.
+**Regla de admisión:** una feature entra sólo si hace *notablemente más fácil crear una API*, y si es superficie finita. Un schema builder es finito (11 tipos de columna por 2 dialectos). Un query builder sin joins también: filtrar, ordenar, paginar, guardar y borrar. Con relaciones —lazy loading, cascadas, el N+1— deja de serlo, y por eso `Query<T>` se planta justo ahí.
 
 ---
 
@@ -499,12 +552,13 @@ Syrax compone; no reemplaza. Si tu proyecto necesita algo de esto, tómalo de un
 ┌──────────────────────────────────────────────────┐
 │  Tu aplicación                                   │
 ├──────────────────────────────────────────────────┤
-│  SYRAX  ← ~2700 lineas de cabeceras              │
+│  SYRAX  ← ~3200 lineas de cabeceras              │
 │                                                  │
 │  Ruteo con deducción de tipos desde la firma     │
 │  Binding request → struct, y reglas por campo    │
 │  Errores → respuesta JSON uniforme               │
 │  Mapeo fila de BD → struct, por reflection       │
+│  Query builder tipado sobre ese mismo struct     │
 │  Schema builder y migraciones                    │
 │  Generación de OpenAPI                           │
 │  Middleware, JWT, políticas                      │

@@ -23,6 +23,37 @@ std::optional<Error> update(const Actor& actor, const Post& post) {
 }
 }  // namespace policies
 
+struct User {
+    std::int64_t id;
+    std::string  name;
+    std::string  email;
+    int          age;
+
+    static constexpr auto table = "users";
+};
+
+// Los ejemplos del query builder. Como todo lo de aqui: se compila, no corre.
+Task<void> queryBuilder(std::string email) {
+    const auto adultos = co_await Query<User>()
+        .where(&User::age, ">", 18)
+        .orderBy(&User::name)
+        .limit(10)
+        .get();
+
+    const auto ada   = co_await Query<User>().where(&User::email, "=", email).first();
+    const auto total = co_await Query<User>().count();
+    const bool hay   = co_await Query<User>().whereNotNull(&User::email).exists();
+    const auto fuera = co_await Query<User>().where(&User::age, "<", 18).del();
+
+    User u{.name = "Ada", .email = "ada@x.com", .age = 36};
+    co_await save(u);
+    u.age = 37;
+    co_await save(u);
+    co_await remove(u);
+
+    (void)adultos; (void)ada; (void)total; (void)hay; (void)fuera;
+}
+
 int main() {
     const std::string secreto = "s3cr3t0";
     App app;

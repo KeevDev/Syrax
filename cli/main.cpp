@@ -356,6 +356,126 @@ int cmdTest() {
     return run("ctest --test-dir build --output-on-failure");
 }
 
+// Lee un KEY=VALUE del .env del proyecto. No es un parser completo; es el
+// mismo subconjunto que carga syrax::db::loadDotEnv.
+std::string dotEnv(const std::string& key, std::string fallback = {}) {
+    std::ifstream file(".env");
+    if (!file) return fallback;
+
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.empty() || line[0] == '#') continue;
+
+        const auto eq = line.find('=');
+        if (eq == std::string::npos || line.substr(0, eq) != key) continue;
+
+        auto value = line.substr(eq + 1);
+        if (value.size() >= 2 && (value.front() == '"' || value.front() == '\'') &&
+            value.back() == value.front()) {
+            value = value.substr(1, value.size() - 2);
+        }
+        return value;
+    }
+    return fallback;
+}
+
+// drogon_ctl no viene con syrax: hay que construirlo desde el Drogon que ya
+// bajo FetchContent. Tarda, asi que se guarda en el proyecto y se reutiliza.
+fs::path findOrBuildCtl() {
+    if (run("command -v drogon_ctl > /dev/null 2>&1") == 0) return "drogon_ctl";
+
+    const fs::path cached = "build/_ctl/drogon_ctl/drogon_ctl";
+    if (fs::exists(cached)) return fs::absolute(cached);
+
+    const fs::path source = "build/_deps/drogon-src";
+    if (!fs::exists(source)) {
+        std::cerr << "error: falta " << source << "\n"
+                  << "       corre `syrax build` primero, que es quien baja Drogon.\n";
+        return {};
+    }
+
+    std::cout << "drogon_ctl no esta compilado. Construyendolo una sola vez;\n"
+              << "esto tarda varios minutos porque arrastra Drogon entero.\n\n";
+
+    const std::string configure =
+        "cmake -S " + source.string() + " -B build/_ctl -G Ninja "
+        "-DCMAKE_BUILD_TYPE=Release -DBUILD_CTL=ON -DBUILD_EXAMPLES=OFF "
+        "-DBUILD_TESTING=OFF -DBUILD_ORM=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.10";
+
+    if (run(configure) != 0) return {};
+    if (run("cmake --build build/_ctl --target drogon_ctl") != 0) return {};
+
+    if (!fs::exists(cached)) {
+        std::cerr << "error: drogon_ctl no aparecio donde se esperaba\n";
+        return {};
+    }
+    return fs::absolute(cached);
+}
+
+// Genera el modelo de Drogon (el que usa Mapper<T>) para una tabla concreta.
+//
+// No se hace en `syrax new` a proposito: drogon_ctl lee el esquema de la base,
+// que en ese momento todavia no existe. Y son ~270 lineas por columna, que no
+// se le meten a nadie sin pedirlas.
+int cmdMakeModel(const std::string& table) {
+    if (!inProject()) return 1;
+
+    if (table.empty()) {
+        std::cerr << "uso: syrax make:model <tabla>\n";
+        return 1;
+    }
+
+    const auto engine = dotEnv("DB_ENGINE", "postgres");
+    const bool sqlite = (engine == "sqlite" || engine == "sqlite3");
+
+    const fs::path dir = "src/models/generated";
+    fs::create_directories(dir);
+
+    std::ofstream config(dir / "model.json");
+    if (!config) {
+        std::cerr << "error: no se pudo escribir " << (dir / "model.json") << "\n";
+        return 1;
+    }
+
+    config << "{\n";
+    if (sqlite) {
+        config << "    \"rdbms\": \"sqlite3\",\n"
+               << "    \"filename\": \"" << dotEnv("DB_FILE", "app.db") << "\",\n";
+    } else {
+        config << "    \"rdbms\": \"postgresql\",\n"
+               << "    \"host\": \"" << dotEnv("DB_HOST", "127.0.0.1") << "\",\n"
+               << "    \"port\": " << dotEnv("DB_PORT", "5432") << ",\n"
+               << "    \"dbname\": \"" << dotEnv("DB_NAME", "app") << "\",\n"
+               << "    \"schema\": \"public\",\n"
+               << "    \"user\": \"" << dotEnv("DB_USER", "postgres") << "\",\n"
+               << "    \"password\": \"" << dotEnv("DB_PASSWORD", "") << "\",\n";
+    }
+    config << "    \"tables\": [\"" << table << "\"],\n"
+           << "    \"convert\": { \"enabled\": false },\n"
+           << "    \"relationships\": { \"enabled\": false },\n"
+           << "    \"restful_api_controllers\": { \"enabled\": false }\n"
+           << "}\n";
+    config.close();
+
+    const auto ctl = findOrBuildCtl();
+    if (ctl.empty()) return 1;
+
+    std::cout << "generando el modelo de '" << table << "' desde la base...\n";
+
+    // drogon_ctl pregunta antes de sobreescribir; se responde que si.
+    if (run("yes y 2>/dev/null | " + ctl.string() + " create model " + dir.string()) != 0) {
+        std::cerr << "\nerror: drogon_ctl fallo. Comprueba que la base este levantada y\n"
+                  << "       que " << (dir / "model.json") << " tenga las credenciales correctas.\n";
+        return 1;
+    }
+
+    std::cout << "\nlisto. Para usarlo:\n"
+              << "  #include <drogon/orm/CoroMapper.h>\n"
+              << "  #include \"models/generated/" << table << ".h\"   (o el nombre que genero)\n\n"
+              << "  CoroMapper<...> mapper(syrax::db::client());\n";
+    return 0;
+}
+
 int cmdSeed() {
     if (!inProject()) return 1;
     return runSqlDir("database/seeders", "cargando seeders");
@@ -374,6 +494,7 @@ int usage() {
         "  migrate:rollback                      m:r  revierte la ultima\n"
         "  migrate:status                        m:s  muestra cuales estan aplicadas\n"
         "  db:seed                               seed carga database/seeders/*.sql\n"
+        "  make:model <tabla>                    m:m  genera el modelo de Drogon (Mapper<T>)\n"
         "  test                                  t    compila y corre los tests\n"
         "\n"
         "  upgrade                               -u   recompila e instala la ultima version\n"
@@ -426,6 +547,9 @@ int main(int argc, char** argv) {
     if (cmd == "migrate:rollback") return cmdMigrate("migrate:rollback");
     if (cmd == "migrate:status")   return cmdMigrate("migrate:status");
     if (cmd == "db:seed")          return cmdSeed();
+    if (cmd == "make:model" || cmd == "m:m") {
+        return cmdMakeModel(argc > 2 ? argv[2] : "");
+    }
     if (cmd == "test")             return cmdTest();
     if (cmd == "upgrade")          return cmdUpgrade();
     if (cmd == "help")             return usage();

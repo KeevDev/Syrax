@@ -90,6 +90,18 @@ inline void loadDotEnv(const std::string& path = ".env") {
     }
 }
 
+// Que motor se configuro. El query builder lo necesita: postgres numera los
+// parametros ($1, $2) y sqlite usa '?' posicional, y el motor sale del .env,
+// asi que no se puede decidir en compilacion.
+enum class Dialect { Postgres, Sqlite };
+
+inline Dialect& activeDialect() {
+    static Dialect dialect = Dialect::Postgres;
+    return dialect;
+}
+
+inline Dialect dialect() { return activeDialect(); }
+
 // Configura la conexion desde variables de entorno, estilo 12-factor.
 //
 //   DB_ENGINE            postgres (default) | sqlite
@@ -104,6 +116,7 @@ inline void configureFromEnv() {
     const auto engine = env("DB_ENGINE", "postgres");
 
     if (engine == "sqlite" || engine == "sqlite3") {
+        activeDialect() = Dialect::Sqlite;
         drogon::app().addDbClient(drogon::orm::Sqlite3Config{
             .connectionNumber = 1,
             .filename         = env("DB_FILE", "app.db"),
@@ -113,6 +126,7 @@ inline void configureFromEnv() {
         return;
     }
 
+    activeDialect() = Dialect::Postgres;
     drogon::app().addDbClient(drogon::orm::PostgresConfig{
         .host             = env("DB_HOST", "127.0.0.1"),
         .port             = static_cast<unsigned short>(std::stoi(env("DB_PORT", "5432"))),

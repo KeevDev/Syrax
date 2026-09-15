@@ -519,6 +519,10 @@ struct User {
     std::string  name;
     std::string  email;
     int          age;
+
+    // Con esto el modelo se puede usar con Query<User>, save() y remove().
+    // Sin esto sigue sirviendo para db::query con SQL a mano.
+    static constexpr auto table = "users";
 };
 
 }  // namespace models
@@ -629,6 +633,7 @@ namespace repositories {
 
 namespace UserRepository {
 syrax::Task<std::vector<models::User>>   all();
+syrax::Task<std::vector<models::User>>   adultos();
 syrax::Task<std::optional<models::User>> find(std::int64_t id);
 syrax::Task<bool>                        emailTaken(std::string email);
 syrax::Task<std::optional<models::User>> createIfEmailFree(std::string name,
@@ -649,14 +654,21 @@ using syrax::db::findOne;
 using syrax::db::query;
 using syrax::db::returning;
 
+// Con el query builder: las columnas se verifican en compilacion, asi que
+// &models::User::nombre_mal no compila en vez de fallar en produccion.
 syrax::Task<std::vector<models::User>> all() {
-    co_return co_await query<models::User>(
-        "SELECT id, name, email, age FROM users ORDER BY id");
+    co_return co_await syrax::Query<models::User>().orderBy(&models::User::id).get();
 }
 
 syrax::Task<std::optional<models::User>> find(std::int64_t id) {
-    co_return co_await findOne<models::User>(
-        "SELECT id, name, email, age FROM users WHERE id = @P1@", id);
+    co_return co_await syrax::Query<models::User>().where(&models::User::id, "=", id).first();
+}
+
+// Con SQL a mano: sigue disponible, y es lo que usarias para un JOIN o
+// cualquier cosa que el builder no cubre.
+syrax::Task<std::vector<models::User>> adultos() {
+    co_return co_await query<models::User>(
+        "SELECT id, name, email, age FROM users WHERE age >= @P1@ ORDER BY id", 18);
 }
 
 syrax::Task<bool> emailTaken(std::string email) {

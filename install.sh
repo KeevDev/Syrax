@@ -121,7 +121,7 @@ esac
 
 if [ "$ON_PATH" -eq 1 ]; then
     say ""
-    say "listo. syrax $("$TARGET" version | awk '{print $2}') instalado."
+    say "listo. $("$TARGET" version | head -1) instalado en $TARGET"
 elif [ "$ADD_TO_PATH" -eq 1 ]; then
     case "${SHELL:-}" in
         */zsh)  RC="$HOME/.zshrc" ;;

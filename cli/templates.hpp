@@ -103,6 +103,20 @@ inline constexpr std::string_view kMigrationSqlite = R"T(CREATE TABLE IF NOT EXI
 );
 )T";
 
+inline constexpr std::string_view kAppConfig = R"T({
+    "app": {
+        "number_of_threads": 0,
+        "enable_session": false,
+        "document_root": "./public",
+        "max_connections": 100000,
+        "client_max_body_size": "1M"
+    },
+    "log": {
+        "log_level": "INFO"
+    }
+}
+)T";
+
 inline constexpr std::string_view kReadme = R"T(# @NAME@
 
 API construida con [Syrax](https://github.com/KeevDev/Syrax). Motor: **@ENGINE@**.
@@ -110,7 +124,6 @@ API construida con [Syrax](https://github.com/KeevDev/Syrax). Motor: **@ENGINE@*
 ## Arrancar
 
 ```bash
-cp .env.example .env
 @SETUP@
 syrax serve
 ```
@@ -124,6 +137,10 @@ curl -X POST localhost:8080/users -H 'Content-Type: application/json' \
 ## Estructura
 
 ```
+config/app.json           ajustes del servidor (versionado)
+.env                      credenciales (NO versionado)
+migrations/               esquema
+
 src/
 ├── main.cpp              arranque y conexion a la BD
 ├── routes.*              donde se arma la API
@@ -165,11 +182,19 @@ inline constexpr std::string_view kMain = R"T(#include <syrax/syrax.hpp>
 
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 
 int main(int argc, char** argv) {
     const auto port = static_cast<std::uint16_t>(argc > 1 ? std::atoi(argv[1]) : 8080);
 
-    // Lee DB_ENGINE, DB_HOST, DB_NAME... del entorno. Ver .env.example
+    // Ajustes del servidor: hilos, logging, limites. Sin secretos: esto se
+    // versiona.
+    if (std::filesystem::exists("config/app.json")) {
+        drogon::app().loadConfigFile("config/app.json");
+    }
+
+    // Credenciales y conexion, desde el entorno. Esto NO se versiona.
+    // Ver .env
     syrax::db::configureFromEnv();
 
     syrax::App app;
@@ -523,8 +548,11 @@ inline constexpr File kProjectFiles[] = {
     {"CMakeLists.txt",                      kCMake},
     {".gitignore",                          kGitignore},
     {"README.md",                           kReadme},
+    {"config/app.json",                     kAppConfig},
     {".env.example",                        kEnvPostgres,       Engine::Postgres},
     {".env.example",                        kEnvSqlite,         Engine::Sqlite},
+    {".env",                                kEnvPostgres,       Engine::Postgres},
+    {".env",                                kEnvSqlite,         Engine::Sqlite},
     {"docker-compose.yml",                  kCompose,           Engine::Postgres},
     {"migrations/001_create_users.sql",     kMigrationPostgres, Engine::Postgres},
     {"migrations/001_create_users.sql",     kMigrationSqlite,   Engine::Sqlite},

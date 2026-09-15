@@ -19,6 +19,12 @@ namespace fs = std::filesystem;
 
 namespace {
 
+// install.sh graba aqui la ruta del checkout del que salio este binario,
+// para que `syrax upgrade` sepa de donde recompilarse.
+#ifndef SYRAX_SOURCE_DIR
+#define SYRAX_SOURCE_DIR ""
+#endif
+
 constexpr std::string_view kDefaultRepo = "https://github.com/KeevDev/Syrax.git";
 constexpr std::string_view kDefaultTag  = "main";
 
@@ -160,8 +166,7 @@ int cmdNew(const std::string& name, tpl::Engine engine, bool engineGiven) {
     for (const auto& path : written) std::cout << "  " << path << "\n";
 
     std::cout << "\nsiguiente paso:\n"
-              << "  cd " << name << "\n"
-              << "  cp .env.example .env\n";
+              << "  cd " << name << "\n";
     if (pg) {
         std::cout << "  docker compose up -d\n";
     }
@@ -199,6 +204,22 @@ int cmdServe(const std::string& port) {
     return run("./" + bin.string() + " " + port);
 }
 
+// Recompila e reinstala desde el checkout de origen. Si el binario se
+// instalo desde GitHub, clona de nuevo.
+int cmdUpgrade() {
+    const std::string source = SYRAX_SOURCE_DIR;
+
+    if (!source.empty() && fs::exists(fs::path(source) / "install.sh")) {
+        std::cout << "actualizando desde " << source << "\n\n";
+        return run("cd '" + source + "' && git pull --ff-only 2>/dev/null; ./install.sh");
+    }
+
+    std::cout << "actualizando desde " << kDefaultRepo << "\n\n";
+    const std::string tmp = "/tmp/syrax-upgrade-$$";
+    return run("rm -rf " + tmp + " && git clone --depth 1 " + std::string{kDefaultRepo} +
+               " " + tmp + " && cd " + tmp + " && ./install.sh && rm -rf " + tmp);
+}
+
 int usage() {
     std::cout <<
         "syrax " SYRAX_VERSION "\n"
@@ -207,6 +228,7 @@ int usage() {
         "  syrax new <nombre> [--db postgres|sqlite]   crea un proyecto\n"
         "  syrax build                                 configura y compila\n"
         "  syrax serve [--port N]                      compila y levanta (default 8080)\n"
+        "  syrax upgrade                               recompila e instala la ultima version\n"
         "  syrax version                               muestra la version\n"
         "\n"
         "Sin --db, `new` pregunta el motor si hay terminal interactiva.\n"
@@ -260,8 +282,15 @@ int main(int argc, char** argv) {
         return cmdServe(port);
     }
 
+    if (cmd == "upgrade") return cmdUpgrade();
+
     if (cmd == "version" || cmd == "--version" || cmd == "-v") {
-        std::cout << "syrax " SYRAX_VERSION "\n";
+        std::cout << "syrax " SYRAX_VERSION "  (build " __DATE__ ")\n";
+
+        const std::string source = SYRAX_SOURCE_DIR;
+        if (!source.empty()) std::cout << "origen: " << source << "\n";
+
+        std::cout << "actualizar con: syrax upgrade\n";
         return 0;
     }
     if (cmd == "help" || cmd == "--help" || cmd == "-h") return usage();

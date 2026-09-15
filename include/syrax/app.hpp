@@ -103,6 +103,11 @@ public:
     }
 
     void run(std::uint16_t port = 8080) {
+        // Drogon sirve una pagina HTML para rutas no encontradas. Una API debe
+        // responder JSON siempre, incluso cuando el error lo genera el transporte.
+        drogon::app().setCustom404Page(
+            detail::makeError(404, "route not found"), /*set404=*/true);
+
         drogon::app().addListener("0.0.0.0", port).run();
     }
 

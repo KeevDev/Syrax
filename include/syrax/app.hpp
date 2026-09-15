@@ -30,6 +30,18 @@ concept BodyLike = std::is_class_v<T> && !std::is_same_v<T, std::string>;
 // no es un body valido.
 inline constexpr glz::opts kStrict{.error_on_missing_keys = true};
 
+// Un `&&` en una condicion de `if constexpr` NO protege a sus operandos de
+// instanciarse: `tuple_element_t<N - 1, T>` con N == 0 desborda a SIZE_MAX y
+// el programa no compila. Hay que cortar con un `if constexpr` de verdad.
+template <typename Tuple>
+constexpr bool hasTrailingBody() {
+    if constexpr (std::tuple_size_v<Tuple> == 0) {
+        return false;
+    } else {
+        return BodyLike<std::tuple_element_t<std::tuple_size_v<Tuple> - 1, Tuple>>;
+    }
+}
+
 // Quita el ultimo elemento de una tupla de tipos. Sirve para separar
 // "los primeros N argumentos son path params, el ultimo es el body".
 template <typename Tuple, std::size_t... I>
@@ -129,8 +141,7 @@ private:
         // Un handler puede pedir path params y body a la vez:
         //   [](int64_t id, UpdateUser body) -> Result<UserResponse>
         // El body, si lo hay, es siempre el ultimo argumento.
-        if constexpr (AllowBody && kArity >= 1 &&
-                      detail::BodyLike<std::tuple_element_t<kArity - 1, Args>>) {
+        if constexpr (AllowBody && detail::hasTrailingBody<Args>()) {
             registerWithBody<std::tuple_element_t<kArity - 1, Args>>(
                 path, std::forward<F>(f), method, okStatus,
                 static_cast<detail::DropLast<Args>*>(nullptr));

@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <map>
 #include <optional>
+#include <vector>
 #include <string>
 
 using namespace syrax;
@@ -50,6 +51,13 @@ int main(int argc, char** argv) {
     const auto port = static_cast<std::uint16_t>(argc > 1 ? std::atoi(argv[1]) : 8080);
 
     App app;
+
+    // Handler sin argumentos: el caso que rompia la deduccion del body.
+    app.get("/users", []() -> Result<std::vector<User>> {
+        std::vector<User> out;
+        for (const auto& [id, u] : g_users) out.push_back(u);
+        return out;
+    });
 
     app.post("/users", [](CreateUser req) -> Result<User> {
         if (emailExists(req.email))

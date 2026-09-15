@@ -5,6 +5,7 @@
 
 #include <syrax/middleware.hpp>
 #include <syrax/validation.hpp>
+#include <syrax/ws.hpp>
 #include <syrax/openapi.hpp>
 #include <syrax/result.hpp>
 #include <syrax/traits.hpp>
@@ -274,6 +275,24 @@ public:
         return *this;
     }
 
+    // Un endpoint WebSocket. El prefijo de use(prefix, ...) no aplica: los
+    // middlewares de Syrax corren sobre respuestas HTTP, y un socket no las
+    // tiene despues del handshake. La autenticacion va dentro de onOpen.
+    //
+    //   app.ws("/chat", {
+    //       .onOpen    = [&](const Socket& s) { room.join(s); },
+    //       .onMessage = [&](const Socket&, std::string_view text) {
+    //           room.broadcast(text);
+    //       },
+    //       .onClose   = [&](const Socket& s) { room.leave(s); },
+    //   });
+    App& ws(const std::string& path, SocketHandlers handlers) {
+        detail::wsRegistry()[path] = std::move(handlers);
+        detail::WsBridge::addPath(path);
+        sockets_.push_back(path);
+        return *this;
+    }
+
     App& cors(CorsOptions options = {}) {
         cors_ = std::move(options);
         return *this;
@@ -437,7 +456,15 @@ private:
                       << "\033[0m\n";
         }
 
-        std::cout << "\n  " << routes_.size() << " rutas.  Ctrl+C para detener.\n\n"
+        for (const auto& socket : sockets_) {
+            std::cout << "  \033[32m->\033[0m  WS:     \033[4mws://localhost:" << port << socket
+                      << "\033[0m\n";
+        }
+
+        std::cout << "\n  " << routes_.size() << " rutas"
+                  << (sockets_.empty() ? std::string{}
+                                       : ", " + std::to_string(sockets_.size()) + " sockets")
+                  << ".  Ctrl+C para detener.\n\n"
                   << std::flush;
     }
 
@@ -472,6 +499,7 @@ private:
     std::vector<ResponseMiddleware>  responseMiddlewares_;
     std::optional<CorsOptions>       cors_;
     std::vector<RouteInfo>           routes_;
+    std::vector<std::string>         sockets_;
     std::string            title_       = "API";
     std::string            version_     = "1.0.0";
     bool                   docsEnabled_ = true;

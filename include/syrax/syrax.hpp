@@ -9,3 +9,4 @@
 #include <syrax/policy.hpp>
 #include <syrax/result.hpp>
 #include <syrax/validation.hpp>
+#include <syrax/ws.hpp>

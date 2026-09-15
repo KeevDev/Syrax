@@ -34,3 +34,57 @@ jobs:
 
       - name: El CLI arranca
         run: ./build/cli/syrax version
+
+  # El Dockerfile que genera `syrax new` se construye de verdad aqui. Es el
+  # unico entorno donde se puede: la maquina de desarrollo no alcanza los
+  # repos de Debian desde dentro de un contenedor.
+  docker:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar dependencias
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            g++-14 cmake ninja-build \
+            libjsoncpp-dev uuid-dev zlib1g-dev libssl-dev \
+            libpq-dev libsqlite3-dev libc-ares-dev libbrotli-dev
+
+      - name: Compilar el CLI
+        env:
+          CXX: g++-14
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --target syrax
+
+      - name: Generar un proyecto
+        run: ./build/cli/syrax new demo --db sqlite
+
+      # El proyecto generado apunta al tag publicado. En un PR que todavia no
+      # tiene tag, se lo redirige al commit que se esta probando: si no, el
+      # Docker build valida una version vieja del framework y el job pasa
+      # aunque este commit no compile.
+      - name: Apuntar el proyecto a este commit
+        working-directory: demo
+        run: |
+          sed -i "s|GIT_TAG .*|GIT_TAG ${GITHUB_SHA}|" CMakeLists.txt
+          grep -n "GIT_TAG" CMakeLists.txt
+
+      - name: Construir la imagen
+        working-directory: demo
+        run: docker build -f docker/Dockerfile -t syrax-demo .
+
+      - name: La imagen arranca y responde
+        run: |
+          docker run -d --name demo -p 8080:8080 syrax-demo
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8080/health >/dev/null 2>&1; then
+              echo "responde en ${i}s"; break
+            fi
+            sleep 1
+          done
+          curl -fsS http://localhost:8080/health
+          docker logs demo
+          docker rm -f demo

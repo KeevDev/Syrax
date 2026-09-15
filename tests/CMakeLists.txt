@@ -10,11 +10,13 @@ add_executable(syrax_tests
     result_test.cpp
     openapi_test.cpp
     db_test.cpp
+    test_server.cpp
     http_test.cpp
     auth_test.cpp
     policy_test.cpp
     middleware_test.cpp
     validation_test.cpp
+    ws_test.cpp
 )
 target_link_libraries(syrax_tests PRIVATE syrax::syrax Catch2::Catch2WithMain)
 

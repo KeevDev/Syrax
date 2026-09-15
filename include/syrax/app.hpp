@@ -184,8 +184,12 @@ private:
         if constexpr (detail::kIsTask<Ret>) {
             drogon::app().registerHandler(
                 path,
-                [f, okStatus](const drogon::HttpRequestPtr& req, detail::Callback cb,
+                [f, okStatus](const drogon::HttpRequestPtr& req, detail::Callback&& cbRef,
                               detail::AsString<Params>... raws) -> drogon::Task<void> {
+                    // La referencia no sobrevive al co_await: copiar al frame.
+                    auto cb      = std::move(cbRef);
+                    auto request = req;
+
                     std::tuple<std::optional<Params>...> params{
                         detail::convertParam<Params>(raws)...};
 
@@ -195,7 +199,7 @@ private:
                     }
 
                     Body        body{};
-                    std::string rawBody{req->getBody()};
+                    std::string rawBody{request->getBody()};
                     if (auto ec = glz::read<detail::kStrict>(body, rawBody)) {
                         cb(detail::makeError(422, glz::format_error(ec, rawBody)));
                         co_return;
@@ -249,8 +253,11 @@ private:
         if constexpr (detail::kIsTask<Ret>) {
             drogon::app().registerHandler(
                 path,
-                [f, okStatus](const drogon::HttpRequestPtr& req, detail::Callback cb,
+                [f, okStatus](const drogon::HttpRequestPtr& req, detail::Callback&& cbRef,
                               detail::AsString<Args>... raws) -> drogon::Task<void> {
+                    // La referencia no sobrevive al co_await: copiar al frame.
+                    auto cb = std::move(cbRef);
+
                     std::tuple<std::optional<Args>...> conv{
                         detail::convertParam<Args>(raws)...};
 

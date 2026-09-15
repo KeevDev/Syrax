@@ -15,6 +15,10 @@ struct CreateUser {
     int         age;
 };
 
+struct Health {
+    std::string status;
+};
+
 struct User {
     std::int64_t id;
     std::string  name;
@@ -70,6 +74,12 @@ int main(int argc, char** argv) {
         auto user = findUser(id);
         if (!user) return NotFound("user not found");
         return *user;
+    });
+
+    // Guardia de regresion: ejercita el camino de registro de corrutinas,
+    // que tiene reglas de vida de parametros distintas al sincrono.
+    app.get("/health", []() -> Task<Result<Health>> {
+        co_return Health{.status = "ok"};
     });
 
     app.run(port);

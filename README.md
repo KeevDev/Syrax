@@ -227,6 +227,27 @@ const auto fuera = co_await Query<User>().where(&User::age, "<", 18).del();
 
 También `orWhere`, `whereIn`, `whereNull`, `offset`. `toSql()` devuelve la consulta sin ejecutarla, para cuando quieras ver qué salió.
 
+**Los `OR` van entre paréntesis o no van.** En SQL `AND` aprieta más que `OR`, así que una cadena plana de `where`/`orWhere` no significa lo que se lee de izquierda a derecha. `whereGroup` cierra el grupo:
+
+```cpp
+co_await Query<Invoice>()
+    .where(&Invoice::status, "=", Status::Pending)
+    .whereGroup([](auto& g) {
+        g.where(&Invoice::total, ">", 100).orWhere(&Invoice::vip, "=", true);
+    })
+    .get();
+// WHERE "status" = $1 AND ("total" > $2 OR "vip" = $3)
+```
+
+**Cambiar muchas filas en una sola consulta** —el hermano de `del()`, para no traerse cada objeto y guardarlo uno a uno:
+
+```cpp
+const auto cambiadas = co_await Query<Invoice>()
+    .where(&Invoice::status, "=", Status::PendingPayment)
+    .set(&Invoice::status, Status::Paid)
+    .update();                      // devuelve cuántas tocó
+```
+
 Guardar y borrar objetos:
 
 ```cpp
@@ -239,11 +260,12 @@ co_await remove(u);
 
 La clave primaria es `id` salvo que declares otra: `static constexpr auto primaryKey = "doc_id";`.
 
-Tres cosas que lo separan de escribir el `SELECT`:
+Cuatro cosas que lo separan de escribir el `SELECT`:
 
 - **La columna se nombra con `&User::email`, no con un string.** Glaze resuelve el nombre en compilación comparando la dirección del miembro contra los campos que refleja, así que `&User::emial` **no compila** en vez de fallar en producción.
 - **Las columnas salen del struct.** Añadir un campo al modelo no obliga a tocar ningún `SELECT`.
 - **El dialecto lo pone Syrax.** Postgres numera los parámetros (`$1, $2`) y SQLite usa `?`; el motor sale del `.env`, así que la misma consulta vale en los dos.
+- **Un `enum class` vale como valor y como campo.** La columna guarda el entero y el struct guarda los nombres: `where(&Invoice::status, "=", Status::Paid)` enlaza el tipo subyacente, y al leer la fila vuelve a ser `Status`.
 
 **Lo que no hace, a propósito: joins, relaciones, subconsultas, `GROUP BY`.** Ahí un query builder deja de tener fondo y acaba siendo un dialecto de SQL peor que SQL. Para eso `db::query` sigue donde estaba, y las dos formas conviven en el mismo repositorio —de hecho el que genera `syrax new` usa una para lo simple y la otra para lo que no lo es.
 
@@ -503,7 +525,7 @@ syrax test                     # en el repo de Syrax
 ctest --test-dir build         # equivalente
 ```
 
-128 casos cubriendo el generador de DDL en ambos dialectos, `ALTER TABLE` ejecutado contra SQLite real, el mapeo de filas a structs, el query builder contra SQLite real —SQL generado, `save`/`remove`, paginación y el `IN ()` vacío—, las reglas de validación y su anotación del JSON Schema, la generación de OpenAPI, JWT y hashing de contraseñas, middlewares y políticas, la integración HTTP completa (ruteo, binding de body, 422 con detalle por campo, path params, corrutinas, el 404 y el 500 en JSON) y los WebSockets hablando el protocolo a mano contra el servidor real.
+137 casos cubriendo el generador de DDL en ambos dialectos, `ALTER TABLE` ejecutado contra SQLite real, el mapeo de filas a structs, el query builder contra SQLite real —SQL generado, `save`/`remove`, `update` masivo, paginación, enums, el `IN ()` vacío y que agrupar con `whereGroup` cambia qué filas vuelven—, las reglas de validación y su anotación del JSON Schema, la generación de OpenAPI, JWT y hashing de contraseñas, middlewares y políticas, la integración HTTP completa (ruteo, binding de body, 422 con detalle por campo, path params, corrutinas, el 404 y el 500 en JSON) y los WebSockets hablando el protocolo a mano contra el servidor real.
 
 CI en GitHub Actions, en cada push y PR:
 

@@ -46,7 +46,19 @@ T fromRow(const drogon::orm::Row& row) {
                 if (field.isNull()) return;
 
                 if constexpr (syrax::detail::kIsOptional<Member>) {
-                    member = field.template as<typename Member::value_type>();
+                    using Value = typename Member::value_type;
+                    if constexpr (std::is_enum_v<Value>) {
+                        member = static_cast<Value>(
+                            field.template as<std::underlying_type_t<Value>>());
+                    } else {
+                        member = field.template as<Value>();
+                    }
+                } else if constexpr (std::is_enum_v<Member>) {
+                    // La columna guarda un entero y el struct lo declara con
+                    // nombres. Drogon no sabe leer un enum, asi que se lee el
+                    // tipo subyacente y se convierte.
+                    member = static_cast<Member>(
+                        field.template as<std::underlying_type_t<Member>>());
                 } else {
                     member = field.template as<Member>();
                 }

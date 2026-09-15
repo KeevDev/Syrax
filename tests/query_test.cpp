@@ -33,6 +33,17 @@ struct Doc {
     static constexpr auto primaryKey = "doc_id";
 };
 
+// Un estado como enum: la columna guarda el entero, el struct los nombres.
+enum class Status : std::int64_t { Draft = 1, Sent = 2, Paid = 3 };
+
+struct Invoice {
+    std::int64_t id;
+    Status       status;
+    int          total;
+
+    static constexpr auto table = "invoices";
+};
+
 class TempDb {
 public:
     TempDb() : path_{fs::temp_directory_path() / name()} {
@@ -47,6 +58,11 @@ public:
             "('grace', 'grace@x.com', 45), ('linus', NULL, 17)");
         client_->execSqlSync(
             "CREATE TABLE docs (doc_id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT)");
+        client_->execSqlSync(
+            "CREATE TABLE invoices (id INTEGER PRIMARY KEY AUTOINCREMENT, status INTEGER, "
+            "total INTEGER)");
+        client_->execSqlSync(
+            "INSERT INTO invoices (status, total) VALUES (1, 100), (2, 200), (3, 300)");
     }
     ~TempDb() {
         client_.reset();
@@ -275,4 +291,164 @@ TEST_CASE("postgres numera los parametros y sqlite no", "[query]") {
     CHECK(lite.find("\"age\" > ?") != std::string::npos);
 
     syrax::db::activeDialect() = previo;
+}
+
+// ------------------------------------------------------------ agrupacion
+
+TEST_CASE("whereGroup pone los parentesis", "[query]") {
+    SqliteDialect dialect;
+
+    const auto sql = Query<User>()
+                         .where(&User::age, ">", 18)
+                         .whereGroup([](auto& g) {
+                             g.where(&User::name, "LIKE", std::string{"a%"})
+                                 .orWhere(&User::email, "IS", nullptr);
+                         })
+                         .toSql();
+
+    CHECK(sql.find(R"("age" > ? AND ("name" LIKE ? OR "email" IS ?))") != std::string::npos);
+}
+
+TEST_CASE("un grupo no rompe la numeracion de los que vienen detras", "[query]") {
+    const auto previo = syrax::db::dialect();
+    syrax::db::activeDialect() = syrax::db::Dialect::Postgres;
+
+    const auto sql = Query<User>()
+                         .where(&User::age, ">", 18)
+                         .whereGroup([](auto& g) {
+                             g.where(&User::name, "=", std::string{"ada"})
+                                 .orWhere(&User::name, "=", std::string{"grace"});
+                         })
+                         .where(&User::age, "<", 99)
+                         .toSql();
+
+    CHECK(sql.find(R"("age" > $1 AND ("name" = $2 OR "name" = $3) AND "age" < $4)") !=
+          std::string::npos);
+
+    syrax::db::activeDialect() = previo;
+}
+
+TEST_CASE("un grupo vacio no deja un parentesis suelto", "[query]") {
+    SqliteDialect dialect;
+
+    const auto sql = Query<User>().where(&User::age, ">", 18).whereGroup([](auto&) {}).toSql();
+
+    CHECK(sql.find("()") == std::string::npos);
+    CHECK(sql.find(R"(WHERE "age" > ?)") != std::string::npos);
+}
+
+TEST_CASE("agrupar cambia que filas vuelven, no solo el SQL", "[query][db]") {
+    SqliteDialect dialect;
+    TempDb        db;
+
+    // Encadenado plano: SQL aplica AND antes que OR, asi que esto es
+    // (age > 18 AND name = 'ada') OR name = 'linus' -> entran los dos.
+    const auto plano = drogon::sync_wait(Query<User>(db.get())
+                                             .where(&User::age, ">", 18)
+                                             .where(&User::name, "=", std::string{"ada"})
+                                             .orWhere(&User::name, "=", std::string{"linus"})
+                                             .get());
+    CHECK(plano.size() == 2);
+
+    // Agrupado: age > 18 AND (name = 'ada' OR name = 'linus'). Linus tiene 17.
+    const auto agrupado = drogon::sync_wait(Query<User>(db.get())
+                                                .where(&User::age, ">", 18)
+                                                .whereGroup([](auto& g) {
+                                                    g.where(&User::name, "=", std::string{"ada"})
+                                                        .orWhere(&User::name, "=",
+                                                                 std::string{"linus"});
+                                                })
+                                                .get());
+    REQUIRE(agrupado.size() == 1);
+    CHECK(agrupado.front().name == "ada");
+}
+
+// --------------------------------------------------------------- update
+
+TEST_CASE("update cambia las filas filtradas en una sola consulta", "[query][db]") {
+    SqliteDialect dialect;
+    TempDb        db;
+
+    const auto tocadas = drogon::sync_wait(Query<User>(db.get())
+                                               .where(&User::age, "<", 18)
+                                               .set(&User::name, std::string{"menor"})
+                                               .set(&User::age, 0)
+                                               .update());
+    CHECK(tocadas == 1);
+
+    // Si el orden de enlace fuera el otro, sqlite habria puesto el 18 en el
+    // nombre o filtrado por "menor": el numero de filas ya no cuadraria.
+    const auto menor = drogon::sync_wait(
+        Query<User>(db.get()).where(&User::name, "=", std::string{"menor"}).first());
+    REQUIRE(menor.has_value());
+    CHECK(menor->age == 0);
+
+    CHECK(drogon::sync_wait(Query<User>(db.get()).count()) == 4);
+    CHECK(drogon::sync_wait(
+              Query<User>(db.get()).where(&User::name, "=", std::string{"ada"}).count()) == 1);
+}
+
+TEST_CASE("un update sin set no toca nada", "[query][db]") {
+    SqliteDialect dialect;
+    TempDb        db;
+
+    // "UPDATE users SET  WHERE ..." no es SQL: el builder ni lo intenta.
+    CHECK(drogon::sync_wait(Query<User>(db.get()).where(&User::age, "<", 18).update()) == 0);
+    CHECK(drogon::sync_wait(
+              Query<User>(db.get()).where(&User::name, "=", std::string{"linus"}).count()) == 1);
+}
+
+TEST_CASE("en postgres el SET se numera detras del WHERE", "[query]") {
+    const auto previo = syrax::db::dialect();
+    syrax::db::activeDialect() = syrax::db::Dialect::Postgres;
+
+    const auto sql = Query<User>()
+                         .where(&User::age, "<", 18)
+                         .set(&User::name, std::string{"menor"})
+                         .toUpdateSql();
+
+    CHECK(sql == R"(UPDATE "users" SET "name" = $2 WHERE "age" < $1)");
+
+    syrax::db::activeDialect() = previo;
+}
+
+// ---------------------------------------------------------------- enums
+
+TEST_CASE("un enum se enlaza como su tipo subyacente", "[query][db]") {
+    SqliteDialect dialect;
+    TempDb        db;
+
+    CHECK(drogon::sync_wait(
+              Query<Invoice>(db.get()).where(&Invoice::status, "=", Status::Paid).count()) == 1);
+
+    const auto pendientes = drogon::sync_wait(
+        Query<Invoice>(db.get())
+            .whereIn(&Invoice::status, {Status::Draft, Status::Sent})
+            .orderBy(&Invoice::total)
+            .get());
+
+    REQUIRE(pendientes.size() == 2);
+    CHECK(pendientes.front().status == Status::Draft);
+}
+
+TEST_CASE("un campo enum vuelve del SELECT con su nombre", "[query][db]") {
+    SqliteDialect dialect;
+    TempDb        db;
+
+    Invoice nueva{.id = 0, .status = Status::Sent, .total = 42};
+    drogon::sync_wait(syrax::save(nueva, db.get()));
+    REQUIRE(nueva.id > 0);
+    CHECK(nueva.status == Status::Sent);
+
+    drogon::sync_wait(Query<Invoice>(db.get())
+                          .where(&Invoice::id, "=", nueva.id)
+                          .set(&Invoice::status, Status::Paid)
+                          .update());
+
+    const auto releida = drogon::sync_wait(
+        Query<Invoice>(db.get()).where(&Invoice::id, "=", nueva.id).first());
+
+    REQUIRE(releida.has_value());
+    CHECK(releida->status == Status::Paid);
+    CHECK(releida->total == 42);
 }

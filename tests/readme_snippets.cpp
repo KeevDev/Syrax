@@ -54,6 +54,33 @@ Task<void> queryBuilder(std::string email) {
     (void)adultos; (void)ada; (void)total; (void)hay; (void)fuera;
 }
 
+enum class Status : std::int64_t { Pending = 1, PendingPayment = 2, Paid = 3 };
+
+struct Invoice {
+    std::int64_t id;
+    Status       status;
+    int          total;
+    bool         vip;
+
+    static constexpr auto table = "invoices";
+};
+
+Task<void> gruposYUpdate() {
+    const auto grandes = co_await Query<Invoice>()
+        .where(&Invoice::status, "=", Status::Pending)
+        .whereGroup([](auto& g) {
+            g.where(&Invoice::total, ">", 100).orWhere(&Invoice::vip, "=", true);
+        })
+        .get();
+
+    const auto cambiadas = co_await Query<Invoice>()
+        .where(&Invoice::status, "=", Status::PendingPayment)
+        .set(&Invoice::status, Status::Paid)
+        .update();
+
+    (void)grandes; (void)cambiadas;
+}
+
 int main() {
     const std::string secreto = "s3cr3t0";
     App app;

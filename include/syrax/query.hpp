@@ -14,6 +14,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -27,6 +28,22 @@ namespace detail {
 // Es lo que permite acumular tipos distintos en un vector: un `where` mezcla
 // enteros, textos y nulos, y el vector homogeneo que acepta Drogon no sirve.
 using ParamBinder = std::function<void(drogon::orm::internal::SqlBinder&)>;
+
+// Drogon no sabe enlazar un enum: su SqlBinder corta con un static_assert que
+// ni siquiera lo menciona. La columna guarda el entero de todas formas, asi
+// que se enlaza el tipo subyacente y el enum sigue siendo el nombre.
+template <typename V>
+auto bindable(V value) {
+    if constexpr (std::is_enum_v<V>) return static_cast<std::underlying_type_t<V>>(value);
+    else                             return value;
+}
+
+template <typename V>
+ParamBinder binder(V value) {
+    return [value = bindable(std::move(value))](drogon::orm::internal::SqlBinder& b) {
+        b << value;
+    };
+}
 
 // Resuelve el nombre de la columna a partir del puntero a miembro, comparando
 // direcciones contra los campos que refleja Glaze. Es lo que hace que
@@ -114,7 +131,7 @@ std::string columnList(bool skipPrimaryKey = false) {
 
 // ---------------------------------------------------------------- Query
 
-// Construye SELECT / DELETE / COUNT sobre un struct plano.
+// Construye SELECT / UPDATE / DELETE / COUNT sobre un struct plano.
 //
 //   auto adultos = co_await Query<User>()
 //       .where(&User::age, ">", 18)
@@ -163,6 +180,22 @@ public:
         return bare("AND", "\"" + detail::columnOf(member) + "\" IS NOT NULL");
     }
 
+    // Agrupa filtros entre parentesis.
+    //
+    //   .where(&Invoice::status, "=", Status::Pending)
+    //   .whereGroup([](auto& g) {
+    //       g.where(&Invoice::total, ">", 100).orWhere(&Invoice::vip, "=", true);
+    //   })
+    //   // WHERE "status" = $1 AND ("total" > $2 OR "vip" = $3)
+    //
+    // Sin esto, mezclar where y orWhere deja mandando la precedencia de SQL
+    // —AND aprieta mas que OR—, que no es como se lee la cadena de llamadas.
+    template <typename F>
+    Query& whereGroup(F&& build) { return group("AND", std::forward<F>(build)); }
+
+    template <typename F>
+    Query& orWhereGroup(F&& build) { return group("OR", std::forward<F>(build)); }
+
     // --- orden y paginacion ---
 
     template <typename C, typename M>
@@ -175,6 +208,14 @@ public:
 
     Query& limit(std::size_t count)  { limit_  = count;  return *this; }
     Query& offset(std::size_t count) { offset_ = count;  return *this; }
+
+    // --- que columnas cambia un update() ---
+
+    template <typename C, typename M, typename V>
+    Query& set(M C::*member, V value) {
+        sets_.push_back({detail::columnOf(member), detail::binder(std::move(value))});
+        return *this;
+    }
 
     // --- ejecucion ---
 
@@ -215,18 +256,52 @@ public:
         co_return result.affectedRows();
     }
 
+    // Aplica los set() a todas las filas que cumplen los filtros, en una sola
+    // consulta. Devuelve cuantas cambiaron. Sin filtros toca la tabla entera,
+    // igual que el SQL a mano.
+    drogon::Task<std::size_t> update() const {
+        if (sets_.empty()) co_return 0;
+
+        auto plan = updatePlan();
+
+        const auto result = co_await detail::run(target(), std::move(plan.first),
+                                                 std::move(plan.second));
+        co_return result.affectedRows();
+    }
+
     // El SQL que se generaria, sin ejecutarlo. Para depurar y para tests.
     std::string toSql() const { return select(); }
+
+    std::string toUpdateSql() const { return updatePlan().first; }
 
 private:
     drogon::orm::DbClientPtr target() const { return client_ ? client_ : db::client(); }
 
+    // Los parametros de un grupo continuan la numeracion del padre, no
+    // empiezan de cero: por eso el indice no es solo params_.size().
+    std::string slot(std::size_t ahead = 0) const {
+        return detail::placeholder(paramBase_ + params_.size() + ahead + 1);
+    }
+
     template <typename V>
     Query& condition(const char* join, std::string column, std::string op, V value) {
-        push(join, "\"" + column + "\" " + op + " " + detail::placeholder(params_.size() + 1));
-        params_.push_back([value = std::move(value)](drogon::orm::internal::SqlBinder& b) {
-            b << value;
-        });
+        push(join, "\"" + column + "\" " + op + " " + slot());
+        params_.push_back(detail::binder(std::move(value)));
+        return *this;
+    }
+
+    template <typename F>
+    Query& group(const char* join, F&& build) {
+        Query sub;
+        sub.paramBase_ = paramBase_ + params_.size();
+        build(sub);
+
+        // Un grupo sin filtros no deja un "()" que ningun motor acepta:
+        // simplemente no existe.
+        if (sub.where_.empty()) return *this;
+
+        push(join, "(" + sub.where_ + ")");
+        for (auto& param : sub.params_) params_.push_back(std::move(param));
         return *this;
     }
 
@@ -241,15 +316,11 @@ private:
         std::string slots;
         for (std::size_t i = 0; i < values.size(); ++i) {
             if (i) slots += ", ";
-            slots += detail::placeholder(params_.size() + i + 1);
+            slots += slot(i);
         }
         push(join, "\"" + column + "\" IN (" + slots + ")");
 
-        for (auto& value : values) {
-            params_.push_back([value = std::move(value)](drogon::orm::internal::SqlBinder& b) {
-                b << value;
-            });
-        }
+        for (auto& value : values) params_.push_back(detail::binder(std::move(value)));
         return *this;
     }
 
@@ -267,6 +338,35 @@ private:
         return where_.empty() ? std::string{} : " WHERE " + where_;
     }
 
+    // Postgres numera los parametros, asi que el SET puede quedarse con los
+    // numeros que sobran detras del WHERE y enlazarse al final. SQLite usa '?'
+    // posicional, donde manda el orden de aparicion en el SQL y el SET va
+    // delante. De ahi que el orden de enlace dependa del motor.
+    std::pair<std::string, std::vector<detail::ParamBinder>> updatePlan() const {
+        const bool numbered = db::dialect() == db::Dialect::Postgres;
+
+        std::string assignments;
+        for (std::size_t i = 0; i < sets_.size(); ++i) {
+            if (i) assignments += ", ";
+            assignments += "\"" + sets_[i].column + "\" = " +
+                           detail::placeholder(numbered ? params_.size() + i + 1 : i + 1);
+        }
+
+        std::vector<detail::ParamBinder> params;
+        params.reserve(params_.size() + sets_.size());
+
+        if (numbered) {
+            params = params_;
+            for (const auto& assignment : sets_) params.push_back(assignment.bind);
+        } else {
+            for (const auto& assignment : sets_) params.push_back(assignment.bind);
+            params.insert(params.end(), params_.begin(), params_.end());
+        }
+
+        return {"UPDATE \"" + detail::tableOf<T>() + "\" SET " + assignments + whereClause(),
+                std::move(params)};
+    }
+
     std::string select() const {
         std::string sql = "SELECT " + detail::columnList<T>() + " FROM \"" +
                           detail::tableOf<T>() + "\"" + whereClause();
@@ -277,12 +377,19 @@ private:
         return sql;
     }
 
+    struct Assignment {
+        std::string         column;
+        detail::ParamBinder bind;
+    };
+
     drogon::orm::DbClientPtr         client_;
     std::string                      where_;
     std::string                      order_;
     std::optional<std::size_t>       limit_;
     std::optional<std::size_t>       offset_;
     std::vector<detail::ParamBinder> params_;
+    std::vector<Assignment>          sets_;
+    std::size_t                      paramBase_ = 0;
 };
 
 // --------------------------------------------------------- persistencia
@@ -341,7 +448,7 @@ drogon::Task<void> save(T& value, drogon::orm::DbClientPtr on = nullptr) {
             slots   += slot;
             assignments += "\"" + key + "\" = " + slot;
 
-            params.push_back([field](drogon::orm::internal::SqlBinder& b) { b << field; });
+            params.push_back(detail::binder(field));
         }(), ...);
     }(std::make_index_sequence<kSize>{});
 
@@ -361,7 +468,7 @@ drogon::Task<void> save(T& value, drogon::orm::DbClientPtr on = nullptr) {
         ([&] {
             if (std::string{keys[I]} != primary) return;
             auto&& field = glz::get_member(value, glz::get<I>(glz::to_tie(value)));
-            params.push_back([field](drogon::orm::internal::SqlBinder& b) { b << field; });
+            params.push_back(detail::binder(field));
         }(), ...);
     }(std::make_index_sequence<kSize>{});
 
@@ -389,7 +496,7 @@ drogon::Task<bool> remove(const T& value, drogon::orm::DbClientPtr on = nullptr)
 
             T    copy  = value;
             auto&& field = glz::get_member(copy, glz::get<I>(glz::to_tie(copy)));
-            params.push_back([field](drogon::orm::internal::SqlBinder& b) { b << field; });
+            params.push_back(detail::binder(field));
         }(), ...);
     }(std::make_index_sequence<kSize>{});
 

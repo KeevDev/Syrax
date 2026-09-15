@@ -43,12 +43,56 @@ public:
     }
     Column& onDeleteCascade() { onDelete_ = "CASCADE"; return *this; }
 
+    // Marca la columna como MODIFICACION de una existente en vez de una nueva.
+    // Se escribe al final del encadenado, como en Laravel:
+    //   t.string("email", 320).nullable().change();
+    Column& change(bool v = true) { change_ = v; return *this; }
+
+    // Quitar el DEFAULT es distinto de no declararlo: hay que pedirlo.
+    Column& dropDefault(bool v = true) { dropDefault_ = v; return *this; }
+
+    // Postgres exige USING cuando la conversion de tipo no es implicita
+    // (texto -> entero, por ejemplo).
+    Column& castUsing(std::string expression) { using_ = std::move(expression); return *this; }
+
     const std::string& name() const { return name_; }
     bool               hasIndex() const { return index_; }
+    bool               isChange() const { return change_; }
 
     // NOT NULL sin DEFAULT no se puede agregar a una tabla que ya tiene filas.
     bool requiresDefaultWhenAdded() const {
-        return !nullable_ && !primary_ && default_.empty();
+        return !change_ && !nullable_ && !primary_ && default_.empty();
+    }
+
+    // Las sentencias que convierten la columna existente en lo declarado.
+    // Postgres necesita una por aspecto: tipo, nulabilidad y default no se
+    // pueden cambiar en un solo ALTER COLUMN.
+    std::vector<std::string> alterStatements(const std::string& table, Dialect dialect) const {
+        if (dialect != Dialect::Postgres) {
+            throw std::logic_error(
+                "syrax: sqlite no soporta ALTER COLUMN. Para cambiar el tipo o las "
+                "restricciones de '" + name_ + "' en '" + table +
+                "' hay que reconstruir la tabla (crear la nueva, copiar, renombrar) "
+                "con Schema::raw(). Es una limitacion del motor, no de syrax.");
+        }
+
+        const std::string prefix = "ALTER TABLE \"" + table + "\" ALTER COLUMN \"" + name_ + "\" ";
+        std::vector<std::string> out;
+
+        std::string type = prefix + "TYPE " + pgType_;
+        if (!using_.empty()) type += " USING " + using_;
+        out.push_back(std::move(type));
+
+        out.push_back(prefix + (nullable_ ? "DROP NOT NULL" : "SET NOT NULL"));
+
+        if (!default_.empty())  out.push_back(prefix + "SET DEFAULT " + default_);
+        else if (dropDefault_)  out.push_back(prefix + "DROP DEFAULT");
+
+        if (unique_) {
+            out.push_back("ALTER TABLE \"" + table + "\" ADD CONSTRAINT \"uq_" + table + "_" +
+                          name_ + "\" UNIQUE (\"" + name_ + "\")");
+        }
+        return out;
     }
 
     std::string definition(Dialect dialect) const {
@@ -70,10 +114,13 @@ public:
 private:
     std::string name_, pgType_, sqliteType_;
     std::string default_, refTable_, refColumn_, onDelete_;
-    bool        nullable_ = false;
-    bool        unique_   = false;
-    bool        primary_  = false;
-    bool        index_    = false;
+    std::string using_;
+    bool        nullable_    = false;
+    bool        unique_      = false;
+    bool        primary_     = false;
+    bool        index_       = false;
+    bool        change_      = false;
+    bool        dropDefault_ = false;
 };
 
 // ------------------------------------------------------------- Blueprint
@@ -123,11 +170,26 @@ public:
 
     void dropIndex(std::string column) { droppedIndexes_.push_back(std::move(column)); }
 
+    // Quita el UNIQUE que puso .unique().change() o el de la creacion.
+    void dropUnique(std::string column) { droppedUniques_.push_back(std::move(column)); }
+
+    // Un CHECK con nombre propio, para poder quitarlo despues.
+    //   t.check("age_no_negativa", "age >= 0");
+    void check(std::string name, std::string expression) {
+        checks_.emplace_back(std::move(name), std::move(expression));
+    }
+
+    void dropConstraint(std::string name) { droppedConstraints_.push_back(std::move(name)); }
+
     const std::string&         table() const { return table_; }
     const std::vector<Column>& columns() const { return columns_; }
 
     const std::vector<std::string>& drops() const { return drops_; }
     const std::vector<std::string>& droppedIndexes() const { return droppedIndexes_; }
+    const std::vector<std::string>& droppedUniques() const { return droppedUniques_; }
+    const std::vector<std::string>& droppedConstraints() const { return droppedConstraints_; }
+
+    const std::vector<std::pair<std::string, std::string>>& checks() const { return checks_; }
 
     const std::vector<std::pair<std::string, std::string>>& renames() const {
         return renames_;
@@ -147,6 +209,9 @@ private:
 
     std::vector<std::string>                         drops_;
     std::vector<std::string>                         droppedIndexes_;
+    std::vector<std::string>                         droppedUniques_;
+    std::vector<std::string>                         droppedConstraints_;
+    std::vector<std::pair<std::string, std::string>> checks_;
     std::vector<std::pair<std::string, std::string>> renames_;
 };
 
@@ -204,6 +269,15 @@ public:
         }
 
         for (const auto& column : blueprint.columns()) {
+            // Una columna marcada con .change() modifica la que ya existe; el
+            // resto se agrega.
+            if (column.isChange()) {
+                for (auto& statement : column.alterStatements(name, dialect_)) {
+                    statements_.push_back(std::move(statement));
+                }
+                continue;
+            }
+
             // Agregar una columna NOT NULL a una tabla con filas falla en
             // postgres y en sqlite si no hay DEFAULT. Se detecta aqui para dar
             // un mensaje util en vez de un error de SQL cripto.
@@ -216,6 +290,21 @@ public:
 
             statements_.push_back("ALTER TABLE \"" + name + "\" ADD COLUMN " +
                                   column.definition(dialect_));
+        }
+
+        for (const auto& [constraint, expression] : blueprint.checks()) {
+            statements_.push_back("ALTER TABLE \"" + name + "\" ADD CONSTRAINT \"" + constraint +
+                                  "\" CHECK (" + expression + ")");
+        }
+
+        for (const auto& column : blueprint.droppedUniques()) {
+            statements_.push_back("ALTER TABLE \"" + name + "\" DROP CONSTRAINT IF EXISTS \"uq_" +
+                                  name + "_" + column + "\"");
+        }
+
+        for (const auto& constraint : blueprint.droppedConstraints()) {
+            statements_.push_back("ALTER TABLE \"" + name + "\" DROP CONSTRAINT IF EXISTS \"" +
+                                  constraint + "\"");
         }
 
         for (const auto& column : blueprint.drops()) {

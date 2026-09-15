@@ -176,3 +176,109 @@ TEST_CASE("dropIndex quita el indice por convencion de nombre", "[schema][alter]
 
     CHECK_THAT(sql, ContainsSubstring("DROP INDEX IF EXISTS \"idx_users_email\""));
 }
+
+TEST_CASE("change() cambia el tipo y la nulabilidad de una columna", "[schema][alter]") {
+    Schema schema{Dialect::Postgres};
+
+    schema.table("users", [](Blueprint& t) {
+        t.string("email", 320).nullable().change();
+    });
+
+    const auto& sql = schema.statements();
+    REQUIRE(sql.size() == 2);
+
+    // Postgres necesita un ALTER por aspecto: tipo y nulabilidad no van juntos.
+    CHECK(sql[0] == R"(ALTER TABLE "users" ALTER COLUMN "email" TYPE VARCHAR(320))");
+    CHECK(sql[1] == R"(ALTER TABLE "users" ALTER COLUMN "email" DROP NOT NULL)");
+}
+
+TEST_CASE("change() a NOT NULL con default emite las tres sentencias", "[schema][alter]") {
+    Schema schema{Dialect::Postgres};
+
+    schema.table("users", [](Blueprint& t) {
+        t.integer("age").defaultTo("0").change();
+    });
+
+    const auto& sql = schema.statements();
+    REQUIRE(sql.size() == 3);
+    CHECK(sql[1] == R"(ALTER TABLE "users" ALTER COLUMN "age" SET NOT NULL)");
+    CHECK(sql[2] == R"(ALTER TABLE "users" ALTER COLUMN "age" SET DEFAULT 0)");
+}
+
+TEST_CASE("quitar el default hay que pedirlo explicitamente", "[schema][alter]") {
+    Schema schema{Dialect::Postgres};
+
+    schema.table("users", [](Blueprint& t) {
+        t.integer("age").nullable().dropDefault().change();
+    });
+
+    CHECK(schema.statements().back() == R"(ALTER TABLE "users" ALTER COLUMN "age" DROP DEFAULT)");
+}
+
+TEST_CASE("castUsing acompana una conversion que postgres no hace sola", "[schema][alter]") {
+    Schema schema{Dialect::Postgres};
+
+    schema.table("users", [](Blueprint& t) {
+        t.integer("age").nullable().castUsing("age::integer").change();
+    });
+
+    CHECK(schema.statements()[0] ==
+          R"(ALTER TABLE "users" ALTER COLUMN "age" TYPE INTEGER USING age::integer)");
+}
+
+TEST_CASE("change() con unique agrega la constraint con nombre predecible", "[schema][alter]") {
+    Schema schema{Dialect::Postgres};
+
+    schema.table("users", [](Blueprint& t) {
+        t.string("email").unique().change();
+    });
+
+    CHECK(schema.statements().back() ==
+          R"(ALTER TABLE "users" ADD CONSTRAINT "uq_users_email" UNIQUE ("email"))");
+}
+
+TEST_CASE("dropUnique usa el mismo nombre que genera unique()", "[schema][alter]") {
+    Schema schema{Dialect::Postgres};
+
+    schema.table("users", [](Blueprint& t) { t.dropUnique("email"); });
+
+    CHECK(schema.statements()[0] ==
+          R"(ALTER TABLE "users" DROP CONSTRAINT IF EXISTS "uq_users_email")");
+}
+
+TEST_CASE("un check se agrega y se quita por nombre", "[schema][alter]") {
+    Schema schema{Dialect::Postgres};
+
+    schema.table("users", [](Blueprint& t) {
+        t.check("age_no_negativa", "age >= 0");
+        t.dropConstraint("vieja");
+    });
+
+    const auto& sql = schema.statements();
+    CHECK(sql[0] == R"(ALTER TABLE "users" ADD CONSTRAINT "age_no_negativa" CHECK (age >= 0))");
+    CHECK(sql[1] == R"(ALTER TABLE "users" DROP CONSTRAINT IF EXISTS "vieja")");
+}
+
+TEST_CASE("change() en sqlite falla con un mensaje que dice que hacer", "[schema][alter]") {
+    Schema schema{Dialect::Sqlite};
+
+    // No es una carencia de syrax: sqlite solo soporta RENAME, ADD y DROP
+    // COLUMN. Cambiar un tipo exige reconstruir la tabla entera.
+    CHECK_THROWS_WITH(
+        schema.table("users", [](Blueprint& t) { t.string("email").change(); }),
+        ContainsSubstring("sqlite no soporta ALTER COLUMN") &&
+            ContainsSubstring("Schema::raw()"));
+}
+
+TEST_CASE("agregar y modificar conviven en la misma migracion", "[schema][alter]") {
+    Schema schema{Dialect::Postgres};
+
+    schema.table("users", [](Blueprint& t) {
+        t.string("phone").nullable();            // nueva
+        t.string("email", 320).nullable().change();  // existente
+    });
+
+    const auto& sql = schema.statements();
+    CHECK(sql[0] == R"(ALTER TABLE "users" ADD COLUMN "phone" VARCHAR(255))");
+    CHECK(sql[1] == R"(ALTER TABLE "users" ALTER COLUMN "email" TYPE VARCHAR(320))");
+}

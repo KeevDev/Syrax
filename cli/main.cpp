@@ -5,8 +5,12 @@
 
 #include "templates.hpp"
 
+#include <fcntl.h>
+#include <sys/wait.h>
+#include <termios.h>
 #include <unistd.h>
 
+#include <csignal>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -294,6 +298,128 @@ int cmdBuild() {
     return run("cmake --build build");
 }
 
+// --------------------------------------------------- servidor recargable
+
+// El estado de la terminal es global a proposito: hay que devolverlo como
+// estaba pase lo que pase —incluido un Ctrl+C— o la shell se queda sin eco.
+termios               gTerminal{};
+bool                  gRawMode     = false;
+volatile sig_atomic_t gInterrupted = 0;
+
+void restoreTerminal() {
+    if (!gRawMode) return;
+    ::tcsetattr(STDIN_FILENO, TCSAFLUSH, &gTerminal);
+    gRawMode = false;
+}
+
+void onInterrupt(int) { gInterrupted = 1; }
+
+// Lee tecla a tecla en vez de linea a linea. Solo se tocan ICANON y ECHO:
+// el mapeo de saltos de linea a la salida se queda como esta, para que lo
+// que imprima cmake y el servidor siga viendose bien.
+bool enableRawMode() {
+    if (!::isatty(STDIN_FILENO)) return false;
+    if (::tcgetattr(STDIN_FILENO, &gTerminal) != 0) return false;
+
+    termios raw = gTerminal;
+    raw.c_lflag &= ~static_cast<tcflag_t>(ICANON | ECHO);
+    raw.c_cc[VMIN]  = 0;   // read() no espera indefinidamente: vuelve cada
+    raw.c_cc[VTIME] = 1;   // decima de segundo para mirar como esta el hijo
+
+    if (::tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) != 0) return false;
+
+    gRawMode = true;
+    std::atexit(restoreTerminal);
+    return true;
+}
+
+pid_t spawnServer(const std::string& bin, const std::string& port) {
+    std::cout.flush();
+
+    const pid_t pid = ::fork();
+    if (pid != 0) return pid;
+
+    // El hijo no hereda stdin: las teclas son para el CLI. Si los dos leen
+    // del mismo sitio, cada pulsacion se la lleva quien llegue primero.
+    const int devnull = ::open("/dev/null", O_RDONLY);
+    if (devnull >= 0) {
+        ::dup2(devnull, STDIN_FILENO);
+        ::close(devnull);
+    }
+
+    if (port.empty()) ::execl(bin.c_str(), bin.c_str(), static_cast<char*>(nullptr));
+    else ::execl(bin.c_str(), bin.c_str(), port.c_str(), static_cast<char*>(nullptr));
+
+    std::cerr << "error: no pude ejecutar " << bin << "\n";
+    ::_exit(127);
+}
+
+void stopServer(pid_t pid) {
+    if (pid <= 0) return;
+
+    ::kill(pid, SIGTERM);
+
+    // Drogon cierra en cuanto recibe la senal. Se le dan cinco segundos por
+    // si esta terminando una peticion, y si no, se le acaba el plazo.
+    for (int i = 0; i < 50; ++i) {
+        if (::waitpid(pid, nullptr, WNOHANG) == pid) return;
+        ::usleep(100000);
+    }
+
+    ::kill(pid, SIGKILL);
+    ::waitpid(pid, nullptr, 0);
+}
+
+int serveWithReload(const std::string& bin, const std::string& port) {
+    std::signal(SIGINT, onInterrupt);
+    std::signal(SIGTERM, onInterrupt);
+
+    pid_t child = spawnServer(bin, port);
+    std::cout << "\n  r  recompila y reinicia      q  salir\n\n";
+
+    for (;;) {
+        if (gInterrupted) {
+            stopServer(child);
+            restoreTerminal();
+            std::cout << "\n";
+            return 0;
+        }
+
+        // Si el servidor se cayo solo —un puerto ocupado, un fallo al
+        // arrancar— no tiene sentido seguir escuchando teclas.
+        int status = 0;
+        if (::waitpid(child, &status, WNOHANG) == child) {
+            restoreTerminal();
+            return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+        }
+
+        char          key = 0;
+        const ssize_t got = ::read(STDIN_FILENO, &key, 1);
+        if (got <= 0) continue;
+
+        if (key == 'q' || key == 'Q') {
+            stopServer(child);
+            restoreTerminal();
+            std::cout << "\n";
+            return 0;
+        }
+
+        if (key != 'r' && key != 'R') continue;
+
+        std::cout << "\nrecompilando...\n";
+        if (const int rc = cmdBuild(); rc != 0) {
+            // El servidor anterior sigue vivo: un error de compilacion no te
+            // deja sin servidor, que es justo cuando mas falta hace.
+            std::cout << "\nno compila; sigue corriendo el binario anterior.\n\n";
+            continue;
+        }
+
+        stopServer(child);
+        std::cout << "\nreiniciando...\n\n";
+        child = spawnServer(bin, port);
+    }
+}
+
 int cmdServe(const std::string& port) {
     if (const int rc = cmdBuild(); rc != 0) return rc;
 
@@ -309,7 +435,11 @@ int cmdServe(const std::string& port) {
         return 1;
     }
 
-    return run("./" + bin.string() + " " + port);
+    // Sin terminal interactiva (un pipe, un contenedor, CI) no hay a quien
+    // escuchar: se ejecuta y se espera, como siempre.
+    if (!enableRawMode()) return run("./" + bin.string() + " " + port);
+
+    return serveWithReload("./" + bin.string(), port);
 }
 
 // Recompila e reinstala desde el checkout de origen. Si el binario se
@@ -488,7 +618,7 @@ int usage() {
         "uso:\n"
         "  new <nombre> [--db postgres|sqlite]   n    crea un proyecto\n"
         "  build                                 b    configura y compila\n"
-        "  serve [--port N]                      s    compila y levanta (APP_PORT, o 8080)\n"
+        "  serve [--port N]                      s    compila y levanta; r recarga, q sale\n"
         "\n"
         "  migrate                               m    aplica las migraciones pendientes\n"
         "  migrate:rollback                      m:r  revierte la ultima\n"

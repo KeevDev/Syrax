@@ -17,6 +17,11 @@ struct RouteInfo {
     std::string requestSchema;   // JSON Schema del body, vacio si no hay
     std::string responseSchema;  // JSON Schema de la respuesta
     int         okStatus = 200;
+
+    // Tipo JSON de cada {param} del path, en el orden en que aparecen. Salen
+    // de la firma del handler: si pide un std::int64_t, el documento dice
+    // integer y no string.
+    std::vector<std::string> paramTypes;
 };
 
 namespace detail {
@@ -106,12 +111,18 @@ inline std::string buildOpenApi(const std::vector<RouteInfo>& routes,
     for (const auto& route : routes) {
         Json::Value operation;
 
-        for (const auto& name : detail::pathParams(route.path)) {
+        const auto names = detail::pathParams(route.path);
+        for (std::size_t i = 0; i < names.size(); ++i) {
             Json::Value parameter;
-            parameter["name"]            = name;
-            parameter["in"]              = "path";
-            parameter["required"]        = true;
-            parameter["schema"]["type"]  = "string";
+            parameter["name"]     = names[i];
+            parameter["in"]       = "path";
+            parameter["required"] = true;
+
+            // Si el handler declara menos argumentos que {params} tiene la
+            // ruta, lo que no se sabe se queda en string en vez de mentir.
+            parameter["schema"]["type"] =
+                i < route.paramTypes.size() ? route.paramTypes[i] : "string";
+
             operation["parameters"].append(parameter);
         }
 

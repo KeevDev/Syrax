@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <syrax/app.hpp>
 #include <syrax/openapi.hpp>
 
 #include <json/json.h>
@@ -19,6 +20,14 @@ Json::Value parse(const std::string& text) {
 }
 
 }  // namespace
+
+// Glaze no refleja tipos sin enlace: el recurso de los tests va con nombre.
+namespace oapi {
+struct Recurso {
+    std::int64_t id;
+};
+}  // namespace oapi
+using oapi::Recurso;
 
 TEST_CASE("el documento declara openapi 3.1 y el titulo", "[openapi]") {
     const auto doc = parse(buildOpenApi({}, "Mi API", "2.0.0"));
@@ -163,4 +172,54 @@ TEST_CASE("sin $defs no aparece un components vacio", "[openapi]") {
     const auto doc = parse(buildOpenApi(routes, "API", "1.0.0"));
 
     CHECK_FALSE(doc.isMember("components"));
+}
+
+TEST_CASE("el tipo del path param sale de la firma, no es string siempre", "[openapi]") {
+    const std::vector<RouteInfo> routes{
+        {.method = "get", .path = "/users/{id}", .responseSchema = R"({"type":"object"})",
+         .okStatus = 200, .paramTypes = {"integer"}},
+        {.method = "get", .path = "/users/{slug}", .responseSchema = R"({"type":"object"})",
+         .okStatus = 200, .paramTypes = {"string"}},
+    };
+
+    const auto doc = parse(buildOpenApi(routes, "API", "1.0.0"));
+
+    CHECK(doc["paths"]["/users/{id}"]["get"]["parameters"][0]["schema"]["type"].asString() ==
+          "integer");
+    CHECK(doc["paths"]["/users/{slug}"]["get"]["parameters"][0]["schema"]["type"].asString() ==
+          "string");
+}
+
+TEST_CASE("si el handler declara menos params que la ruta, no se inventa el tipo", "[openapi]") {
+    const std::vector<RouteInfo> routes{
+        {.method = "get", .path = "/a/{uno}/b/{dos}", .responseSchema = R"({"type":"object"})",
+         .okStatus = 200, .paramTypes = {"integer"}}};
+
+    const auto doc = parse(buildOpenApi(routes, "API", "1.0.0"));
+    const auto& params = doc["paths"]["/a/{uno}/b/{dos}"]["get"]["parameters"];
+
+    REQUIRE(params.size() == 2);
+    CHECK(params[0]["schema"]["type"].asString() == "integer");
+    CHECK(params[1]["schema"]["type"].asString() == "string");
+}
+
+// Lo de arriba comprueba el documento a partir de RouteInfo. Esto comprueba
+// lo otro: que el tipo del handler llegue hasta ahi.
+TEST_CASE("App documenta el path param con el tipo que pide el handler", "[openapi]") {
+    syrax::App app;
+    app.quiet();
+
+    app.get("/users/{id}", [](std::int64_t id) -> syrax::Task<syrax::Result<Recurso>> {
+        co_return Recurso{.id = id};
+    });
+    app.get("/posts/{slug}", [](std::string slug) -> syrax::Task<syrax::Result<Recurso>> {
+        co_return Recurso{.id = static_cast<std::int64_t>(slug.size())};
+    });
+
+    const auto doc = parse(app.openApi());
+
+    CHECK(doc["paths"]["/users/{id}"]["get"]["parameters"][0]["schema"]["type"].asString() ==
+          "integer");
+    CHECK(doc["paths"]["/posts/{slug}"]["get"]["parameters"][0]["schema"]["type"].asString() ==
+          "string");
 }

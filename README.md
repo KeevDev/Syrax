@@ -386,6 +386,14 @@ app.docs("Mi API", "2.0.0");   // titulo y version
 app.withoutDocs();             // apagarlo en produccion
 ```
 
+Eso incluye los path params: un handler `[](std::int64_t id)` documenta `{id}` como `integer`, no como `string`. El tipo lo pone la firma, igual que el resto.
+
+Y el documento se puede sacar sin levantar el servidor, para volcarlo en CI o generar clientes:
+
+```cpp
+const auto spec = app.openApi();   // lo mismo que sirve /openapi.json
+```
+
 ### Puerto y configuración
 
 El puerto se resuelve igual que las credenciales, de más a menos prioridad:

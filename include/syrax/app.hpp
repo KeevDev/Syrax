@@ -124,6 +124,24 @@ std::string schemaOf() {
     return out;
 }
 
+// El tipo JSON con el que se documenta un path param. Drogon lo recibe como
+// texto siempre, pero el handler declara que espera, y eso es lo que el
+// cliente necesita saber: /users/{id} con un int64 es integer, no string.
+template <typename T>
+std::string jsonTypeName() {
+    using Param = std::remove_cvref_t<T>;
+
+    if constexpr (std::is_same_v<Param, bool>)          return "boolean";
+    else if constexpr (std::is_floating_point_v<Param>) return "number";
+    else if constexpr (std::is_integral_v<Param>)       return "integer";
+    else                                                return "string";
+}
+
+template <typename... Params>
+std::vector<std::string> paramTypeNames(std::tuple<Params...>*) {
+    return {jsonTypeName<Params>()...};
+}
+
 template <typename... Params>
 bool allPresent(const std::tuple<std::optional<Params>...>& params) {
     // Con cero params el fold sobre pack vacio da true.
@@ -323,6 +341,12 @@ public:
         return *this;
     }
 
+    // El documento OpenAPI de lo registrado hasta ahora, sin levantar el
+    // servidor. Es lo mismo que sirve /openapi.json: util para volcarlo en
+    // CI, generar clientes, o comprobar en un test que el contrato es el que
+    // se cree que es.
+    std::string openApi() const { return buildOpenApi(routes_, title_, version_); }
+
     App& cors(CorsOptions options = {}) {
         cors_ = std::move(options);
         return *this;
@@ -385,7 +409,8 @@ private:
     // Los esquemas salen de los mismos tipos que usan los handlers, asi que la
     // documentacion no puede desincronizarse del codigo.
     void note(drogon::HttpMethod method, const std::string& path,
-              std::string requestSchema, std::string responseSchema, int okStatus) {
+              std::string requestSchema, std::string responseSchema, int okStatus,
+              std::vector<std::string> paramTypes = {}) {
         static const std::unordered_map<int, std::string> kNames{
             {drogon::Get, "get"},     {drogon::Post, "post"},  {drogon::Put, "put"},
             {drogon::Patch, "patch"}, {drogon::Delete, "delete"},
@@ -400,6 +425,7 @@ private:
             .requestSchema  = std::move(requestSchema),
             .responseSchema = std::move(responseSchema),
             .okStatus       = okStatus,
+            .paramTypes     = std::move(paramTypes),
         });
     }
 
@@ -569,13 +595,15 @@ private:
         if constexpr (AllowBody && detail::hasTrailingBody<Args>()) {
             using Body = std::tuple_element_t<kArity - 1, Args>;
 
-            note(method, path, detail::schemaOf<Body>(), detail::schemaOf<Value>(), okStatus);
+            note(method, path, detail::schemaOf<Body>(), detail::schemaOf<Value>(), okStatus,
+                 detail::paramTypeNames(static_cast<detail::DropLast<Args>*>(nullptr)));
 
             registerWithBody<Body, kWantsRequest>(
                 path, std::forward<F>(f), method, okStatus,
                 static_cast<detail::DropLast<Args>*>(nullptr));
         } else {
-            note(method, path, {}, detail::schemaOf<Value>(), okStatus);
+            note(method, path, {}, detail::schemaOf<Value>(), okStatus,
+                 detail::paramTypeNames(static_cast<Args*>(nullptr)));
 
             registerParams<kWantsRequest>(path, std::forward<F>(f), method, okStatus,
                                           static_cast<Args*>(nullptr));

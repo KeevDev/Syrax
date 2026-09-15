@@ -3,7 +3,12 @@ build/
 compile_commands.json
 uploads/
 
-# proyectos de prueba generados dentro del repo
-/api-*/
-/demo-*/
-/test-*/
+# Lista blanca de directorios en la raiz. Cualquier otro se ignora, incluidos
+# los proyectos de prueba que uno genera aqui sin querer: ya paso dos veces
+# (api-sqlite/, dkv/) y los patrones por nombre no los atraparon.
+/*/
+!/.github/
+!/cli/
+!/example/
+!/include/
+!/tests/

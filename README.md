@@ -1,28 +1,23 @@
 # Syrax
 
-**Un framework de APIs para C++ moderno.** Construido sobre Drogon (HTTP) y Glaze (tipos y JSON).
+**Un framework de APIs para C++ moderno.** Construido sobre [Drogon](https://github.com/drogonframework/drogon) (HTTP) y [Glaze](https://github.com/stephenberry/glaze) (tipos y JSON).
 
-> **Estado: diseño.** Nada de esto está implementado todavía. Este documento se escribió *antes*
-> del código a propósito — si la API no se puede explicar de forma limpia aquí, tampoco va a
-> sentirse limpia al usarla.
+```cpp
+app.post("/users", [](requests::CreateUser body) -> Task<Result<UserResource>> {
+    const auto user = co_await service::create(std::move(body));
+    if (!user) co_return Conflict("email already registered");
 
----
+    co_return resources::from(*user);
+});
+```
 
-## Qué es
+Eso es un endpoint completo: parseo del body, validación, manejo de errores, serialización de la respuesta y documentación OpenAPI. Sin macros, sin heredar de nada, sin anotaciones.
 
-Syrax hace que crear una API REST en C++ se sienta como hacerlo en FastAPI, sin dejar de ser C++ y
-sin quitarte acceso a nada.
-
-Es un framework en el sentido de **FastAPI, no de Laravel**. Ambos invierten el control — tú
-registras handlers, el framework corre el loop. La diferencia está en cuánto poseen: Laravel te
-dicta estructura de directorios, ORM, ciclo de vida y configuración. FastAPI posee el ruteo y la
-validación, y nada más.
-
-Syrax posee cinco cosas. El resto es tuyo.
+> **Estado: funcional, pre-1.0.** El CRUD, las migraciones, la base de datos y OpenAPI funcionan y están cubiertos por tests. La API puede cambiar sin aviso hasta la 1.0.
 
 ---
 
-## Instalacion
+## Instalación
 
 ```bash
 git clone https://github.com/KeevDev/Syrax.git
@@ -30,352 +25,289 @@ cd Syrax
 ./install.sh
 ```
 
-Instala el comando `syrax` en `~/.local/bin` — sin sudo. Tarda **unos segundos**:
-el CLI no enlaza contra la libreria, asi que no descarga ni compila Drogon.
+Instala el comando `syrax` en `~/.local/bin`, sin sudo, en **unos segundos**: el CLI no enlaza contra la librería, así que no descarga ni compila Drogon.
 
 ```bash
 ./install.sh --prefix /usr/local   # otro destino
-./install.sh --add-to-path         # ademas lo agrega a tu shell rc
+./install.sh --add-to-path         # además lo agrega a tu shell rc
 ./install.sh --uninstall           # lo quita
+syrax upgrade                      # actualizar despues
 ```
 
 Requiere CMake 3.25+, git y un compilador con C++23 (GCC 14+ o Clang 17+).
 
-### Primer proyecto
+---
+
+## Empezar
 
 ```bash
-syrax new mi-api
+syrax new mi-api          # pregunta el motor de base de datos
 cd mi-api
+
+docker compose up -d      # solo si elegiste postgres
+syrax migrate
+syrax db:seed             # opcional, datos de ejemplo
 syrax serve
 ```
 
 ```
-$ curl localhost:8080/hello/kevin
-{"message":"hello, kevin"}
+$ curl localhost:8080/api/v1/users
+[{"id":1,"name":"Ada Lovelace","email":"ada@example.com"}]
 ```
 
-La primera compilacion tarda ~3 minutos porque baja y compila Drogon; las
-siguientes son de segundos.
+Y la documentación interactiva en **http://localhost:8080/docs**.
 
-### Comandos
+La primera compilación tarda unos minutos porque baja y compila Drogon; las siguientes son de segundos.
+
+---
+
+## Qué trae
+
+### Handlers tipados
+
+La firma del handler es el contrato. Syrax deduce de ella qué parsear, qué validar y qué documentar.
+
+```cpp
+// Sin argumentos
+app.get("/users", []() -> Task<Result<std::vector<UserResource>>> { ... });
+
+// Path param tipado
+app.get("/users/{id}", [](std::int64_t id) -> Task<Result<UserResource>> { ... });
+
+// Body JSON
+app.post("/users", [](requests::CreateUser body) -> Task<Result<UserResource>> { ... });
+
+// Path param y body a la vez: el body es siempre el ultimo argumento
+app.put("/users/{id}", [](std::int64_t id, requests::UpdateUser body) -> ... { ... });
+```
+
+Los handlers pueden ser síncronos (`Result<T>`) o corrutinas (`Task<Result<T>>`).
+
+### Errores como valores
+
+```cpp
+if (!user) co_return NotFound("user not found");
+```
+
+`BadRequest`, `Unauthorized`, `Forbidden`, `NotFound`, `Conflict`, `Unprocessable`, `Internal`. Todos se traducen a una respuesta JSON uniforme:
+
+```json
+{ "error": { "status": 404, "message": "user not found" } }
+```
+
+Incluso las rutas inexistentes responden JSON, no la página HTML de Drogon.
+
+### Validación estructural automática
+
+El body se parsea en modo estricto antes de que el handler se ejecute. Si algo no cuadra, el cliente recibe un **422** y el handler nunca corre:
 
 | | |
 |---|---|
-| `syrax new <nombre>` | crea un proyecto |
-| `syrax build` | configura y compila |
-| `syrax serve [--port N]` | compila y levanta el servidor |
-| `syrax version` | version instalada |
+| Campo faltante | `missing_key` |
+| Campo desconocido | `unknown_key` |
+| Tipo incorrecto | `parse_number_failure` |
+| JSON malformado | posición exacta del error |
 
----
+> Esto valida la **forma** del JSON, no el contenido. Constraints por campo (largo mínimo, formato de email, rangos) todavía no existen — ver [Limitaciones](#limitaciones-conocidas).
 
-## El problema
+### Base de datos sin ORM ni boilerplate
 
-Un endpoint en Drogon hoy:
-
-```cpp
-class UserController : public drogon::HttpController<UserController> {
-public:
-    METHOD_LIST_BEGIN
-    ADD_METHOD_TO(UserController::createUser, "/users", drogon::Post);
-    METHOD_LIST_END
-
-    void createUser(const HttpRequestPtr& req,
-                    std::function<void(const HttpResponsePtr&)>&& callback) {
-        auto json = req->getJsonObject();
-        if (!json) { /* armar error 400 a mano */ }
-        if (!json->isMember("name")) { /* armar error a mano */ }
-        auto name = (*json)["name"].asString();
-        if (name.length() < 3) { /* armar error a mano */ }
-        // ...repetir por cada campo
-
-        Json::Value out;
-        out["id"] = 1;
-        callback(HttpResponse::newHttpJsonResponse(out));
-    }
-};
-```
-
-Veinticinco líneas, validación a mano y propensa a errores, cero documentación generada.
-
-El mismo endpoint en Syrax:
+Un modelo es un struct plano:
 
 ```cpp
-app.post("/users", [](CreateUser req) -> Result<User> {
-    return User{ .id = save(req), .name = req.name, .email = req.email };
-});
-```
-
-Esa comparación **es** el producto. No hay que explicar la propuesta de valor: cualquiera que haya
-escrito Drogon la entiende en el acto. Y es medible — se cuentan líneas antes y después.
-
----
-
-## Cómo se ve
-
-```cpp
-#include <syrax/syrax.hpp>
-
-struct CreateUser {
-    std::string name;
-    std::string email;
-    int         age;
-};
-
 struct User {
-    int64_t     id;
-    std::string name;
-    std::string email;
-};
-
-int main() {
-    syrax::App app;
-
-    app.post("/users", [](CreateUser req) -> Result<User> {
-        if (emailExists(req.email))
-            return Conflict("email already registered");
-
-        return User{ .id = save(req), .name = req.name, .email = req.email };
-    });
-
-    app.get("/users/{id}", [](int64_t id) -> Result<User> {
-        auto user = findUser(id);
-        if (!user) return NotFound("user not found");
-        return *user;
-    });
-
-    app.run(8080);
-}
-```
-
-`cmake --build build && ./app` → API corriendo, con validación aplicada y OpenAPI en `/docs`.
-
-Sin macros. Sin heredar de nada. Sin registrar rutas en otro archivo. Sin escribir YAML.
-
-### Validación por tipos
-
-Las constraints viven en el tipo, no en un bloque aparte:
-
-```cpp
-struct CreateUser {
-    MinLen<3, std::string>  name;
-    Email                   email;
-    Range<0, 150, int>      age;
+    std::int64_t id;
+    std::string  name;
+    std::string  email;
+    int          age;
 };
 ```
 
-Ventajas sobre un DSL de validación separado: la constraint viaja con el dato y no puede
-desincronizarse de la definición, se auto-documenta, genera sola las constraints del OpenAPI, y
-aprovecha el sistema de tipos de C++ en vez de esconderlo.
-
-Un request inválido produce un 422 con paths y mensajes, sin que escribas nada:
-
-```json
-{
-  "errors": [
-    { "path": "/name",  "message": "must be at least 3 characters" },
-    { "path": "/email", "message": "invalid email format" }
-  ]
-}
+```cpp
+auto users = co_await db::query<User>("SELECT id, name, email, age FROM users");
+auto one   = co_await db::findOne<User>("SELECT ... WHERE id = $1", id);
+auto rows  = co_await db::execute("DELETE FROM users WHERE id = $1", id);
+auto nuevo = co_await db::returning<User>("INSERT ... RETURNING id, name, email, age", ...);
 ```
 
-### El escape hatch
+El mapeo columna → campo lo resuelve Glaze en tiempo de compilación por nombre. **No hay que escribirlo ni generar modelos de 500 líneas.** Una columna `NULL` deja el campo en su valor por defecto; usa `std::optional` si necesitas distinguir.
 
-Siempre puedes bajarte a Drogon puro, a media función, sin pelear con nada:
+Conservas de Drogon el pool de conexiones, las corrutinas, las transacciones y los prepared statements. Lo que no hay es query builder ni relaciones: el SQL está a la vista.
+
+### Migraciones en C++
 
 ```cpp
-app.post("/upload", [](syrax::Raw raw) -> Result<Ack> {
-    const drogon::HttpRequestPtr& req = raw.drogon();   // Drogon, sin intermediarios
-    // ...
+struct CreateUsersTable : syrax::Migration {
+    std::string name() const override { return "001_create_users"; }
+
+    void up(syrax::Schema& schema) override {
+        schema.create("users", [](syrax::Blueprint& table) {
+            table.id();
+            table.string("name");
+            table.string("email").unique();
+            table.integer("age").defaultTo("0");
+            table.timestamps();
+        });
+    }
+
+    void down(syrax::Schema& schema) override { schema.drop("users"); }
+};
+```
+
+El mismo código genera el DDL correcto para PostgreSQL y SQLite. Modificar tablas existentes:
+
+```cpp
+schema.table("users", [](syrax::Blueprint& t) {
+    t.string("phone").nullable();          // ADD COLUMN
+    t.renameColumn("name", "full_name");   // RENAME COLUMN
+    t.dropColumn("age");                   // DROP COLUMN
+    t.dropIndex("email");                  // DROP INDEX
 });
+schema.rename("users", "people");
 ```
-
-Esto no es una nota al pie. Es una restricción de diseño dura: **el día que Syrax atrape a alguien,
-es peor que no existir.**
-
----
-
-## Arquitectura
-
-La tesis central es que Syrax escribe muy poco código. Las partes difíciles ya existen, son
-excelentes, y las mantiene alguien más.
-
-```
-┌──────────────────────────────────────────────────┐
-│  Tu aplicación                                   │
-├──────────────────────────────────────────────────┤
-│  SYRAX  ← lo único que construimos               │
-│                                                  │
-│  1. Ruteo con deducción de tipos desde la firma  │
-│  2. Binding request → struct, con validación     │
-│  3. Errores de validación → 422 estructurado     │
-│  4. Ensamblado del documento OpenAPI             │
-│  5. Onboarding: syrax new → corriendo en 5 min   │
-├─────────────────────────┬────────────────────────┤
-│  GLAZE                  │  DROGON                │
-│  reflection, JSON,      │  HTTP, async,          │
-│  JSON Schema            │  corrutinas, sockets   │
-└─────────────────────────┴────────────────────────┘
-```
-
-**Cinco cosas.** Todo lo demás se delega.
-
-Glaze hace reflection sobre structs agregados sin macros, lo que significa que los DTOs son structs
-normales de C++ — no hay `DESCRIBE`, ni `DTO_FIELD`, ni herencia. Ese es el detalle que hace posible
-el ejemplo de arriba hoy, sin esperar a C++26.
-
-### El segundo problema: el build
-
-Levantar un proyecto C++ con servidor HTTP, JSON y tests en una máquina limpia es un calvario de
-horas. Ningún framework de C++ trata esto como feature. **Syrax sí**, porque es la mitad de lo que
-significa "fácil".
-
-Objetivo medible: en una máquina limpia,
 
 ```bash
-syrax new my-api && cd my-api && syrax serve
+syrax migrate            # aplica las pendientes
+syrax migrate:status     # cuales estan aplicadas
+syrax migrate:rollback   # revierte la ultima
 ```
 
-funciona en **menos de 5 minutos**, sin configurar nada.
+El estado se registra en la tabla `syrax_migrations`. `Schema::raw()` es el escape hatch para SQL que el builder no cubre.
+
+### OpenAPI automático
+
+`/openapi.json` y `/docs` con Swagger UI, generados de las rutas registradas. **Los esquemas salen de los mismos tipos que usan los handlers**, así que la documentación no puede desincronizarse del código: no hay anotaciones que mantener.
+
+```cpp
+app.docs("Mi API", "2.0.0");   // titulo y version
+app.withoutDocs();             // apagarlo en produccion
+```
 
 ---
 
-## Principios de diseño
+## Estructura de un proyecto
 
-Tres reglas. Existen para que el proyecto no vuelva a crecer.
+```
+config/app.json           ajustes del servidor (versionado)
+.env                      credenciales (NO versionado)
+docker/Dockerfile         imagen multi-etapa
+public/                   estaticos
+logs/
 
-### 1. Dramático, no marginal
+database/
+├── migrations.cpp        que migraciones existen y en que orden
+├── migrations/           las migraciones
+├── seeders/              datos de ejemplo
+└── factories/            objetos de mentira para tests
 
-Si Syrax ahorra 20% del código, nadie va a cambiar nada. El listón es **5x o no vale la pena**.
-Se mide contra eso, no contra "quedó más lindo".
+src/
+├── main.cpp
+├── bootstrap/            preparacion de la app
+├── routes/               el mapa de la API, versionable
+│   ├── routes.cpp
+│   └── v1.cpp            rutas de /api/v1
+├── http/                 TODO lo atado al transporte
+│   ├── controllers/User/
+│   ├── requests/User/
+│   └── resources/User/
+├── services/User/        logica de negocio
+├── repositories/User/    SQL
+└── models/User/          la forma de la tabla
+```
 
-### 2. La abstracción nunca es una cárcel
+**Por qué existe `http/`:** marca un límite real. Si mañana expones la misma lógica por gRPC, esa carpeta se tira entera y `services/`, `repositories/` y `models/` siguen sirviendo sin tocarse.
 
-Todo handler puede bajarse a Drogon crudo. Todo componente puede reemplazarse. Syrax agrega
-ergonomía sobre Drogon; no lo oculta ni lo envuelve de forma que estorbe.
+**Por qué `models/` y `resources/` están separados:** `User` tiene `passwordHash` y `UserResource` no. Un campo privado no puede filtrarse por accidente porque el tipo que se serializa simplemente no lo tiene.
 
-### 3. Regla de admisión
-
-Una feature entra sólo si hace *notablemente más fácil crear una API*. No si "sería cómodo
-tenerla". Cada vez que tiente meter ORM, colas o auth, es el framework grande tratando de resucitar.
+Ninguno de esos nombres los conoce el framework: son archivos C++ normales. Renómbralos o bórralos.
 
 ---
 
-## No-objetivos
+## Comandos
 
-Explícitamente fuera de alcance, indefinidamente:
-
-```
-ORM propio          Colas / Jobs        Scheduler
-Modelos/relaciones  Event bus           Service discovery
-Migraciones         gRPC                Load balancing
-Sistema de auth     WebSockets / SSE    Circuit breakers
-Mail                Storage / S3        Notifications
-```
-
-Si un proyecto que usa Syrax necesita algo de esto, lo toma de una librería existente.
-**Syrax compone; no reemplaza.**
-
-Sobre bases de datos: no se construye un ORM. Un ORM es un proyecto multi-año por sí solo y es
-donde mueren los frameworks.
-
----
-
-## Decisiones abiertas
-
-| # | Decisión | Punto de partida |
+| | | |
 |---|---|---|
-| 1 | Modelo de errores | `std::expected` interno; excepciones sólo en el borde HTTP |
-| 2 | Modelo de threading | Documentar el contrato explícito: qué es thread-safe, qué es por request |
-| 3 | Contexto de request | Explícito por parámetro. **Nunca `thread_local`** — las corrutinas migran de hilo |
-| 4 | Estándar C++ | C++20 base (corrutinas, concepts) |
-| 5 | Distribución | Semver + decidir estática / compartida / header-only |
-| 6 | Idioma del repo | Si se busca adopción, el README público tendrá que ser inglés |
+| `syrax new <nombre>` | `n` | crea un proyecto (`--db postgres\|sqlite`) |
+| `syrax build` | `b` | configura y compila |
+| `syrax serve` | `s` | compila y levanta (`--port N`) |
+| `syrax migrate` | `m` | aplica las migraciones pendientes |
+| `syrax migrate:rollback` | `m:r` | revierte la última |
+| `syrax migrate:status` | `m:s` | muestra cuáles están aplicadas |
+| `syrax db:seed` | `seed` | carga `database/seeders/*.sql` |
+| `syrax test` | `t` | compila y corre los tests |
+| `syrax upgrade` | `-u` | recompila e instala la última versión |
+| `syrax version` | `-v` | versión y origen |
 
 ---
 
 ## Tests
 
 ```bash
-syrax test              # compila y corre la suite
-ctest --test-dir build  # equivalente
+syrax test                     # en el repo de Syrax
+ctest --test-dir build         # equivalente
 ```
 
-40 casos cubriendo el generador de DDL (ambos dialectos), el mapeo de filas a
-structs, la generacion de OpenAPI y la integracion HTTP completa: ruteo,
-binding de body, errores de validacion, path params y handlers corrutina.
+47 casos cubriendo el generador de DDL en ambos dialectos, `ALTER TABLE` ejecutado contra SQLite real, el mapeo de filas a structs, la generación de OpenAPI, y la integración HTTP completa: ruteo, binding de body, errores de validación, path params, corrutinas y el 404 en JSON.
+
+CI en GitHub Actions compila y corre la suite en cada push y PR.
 
 ---
 
-## Roadmap
+## Limitaciones conocidas
 
-Cada milestone es útil y publicable solo. Si el proyecto se abandona en cualquier punto, lo hecho
-sirve.
+Las digo aquí en vez de que las descubras tú:
 
-### M0 — Spike · *decide todo*
-
-Hacer compilar y correr **exactamente** el ejemplo de arriba. Un endpoint, todo hardcodeado donde
-haga falta. Es integrar Glaze con Drogon y mirar cómo queda: días, no semanas.
-
-El objetivo no es arquitectura. Es **mirar el código y juzgar honestamente si se siente bien**.
-
-> **Criterio de kill:** si el resultado no es dramáticamente mejor que Drogon pelado, la premisa no
-> existe. Mejor saberlo en la semana 1 que en el mes 12.
-
-### M1 — Ruteo y binding
-
-Deducción de tipos desde la firma del handler, path y query params tipados, deserialización y
-validación automáticas, mapeo uniforme de errores, middleware, handlers como corrutinas.
-
-### M2 — Validación por tipos
-
-`MinLen`, `MaxLen`, `Pattern`, `Range`, `Email`, `Uuid`. Errores acumulados con JSON Pointer.
-
-### M3 — OpenAPI y docs
-
-`/openapi.json` y `/docs` generados de las rutas y los tipos. Sale casi gratis de M1 + M2 y es el
-mayor gancho de adopción.
-
-### M4 — Onboarding
-
-`syrax new`, `syrax serve`, dependencias precompiladas, proyecto que compila de una.
-**Tratarlo como feature, no como tarea de infra** — es donde vive la mitad de la diferenciación, y
-es la parte que todo el mundo deja para después y nunca hace.
+- **Sin constraints por campo.** La validación es estructural (forma del JSON), no semántica. `MinLen`, `Email`, `Range` están planeados pero no existen.
+- **Sin middleware.** Ni autenticación, ni CORS, ni rate limiting.
+- **El Dockerfile no se ha construido end-to-end.** Los nombres de paquete se verificaron contra packages.debian.org, pero en la máquina donde se escribió los contenedores no alcanzan los repos de Debian.
+- **`syrax migrate` compila.** Las migraciones son C++, así que hay un build de por medio.
+- **Sin ALTER de constraints.** Se pueden agregar, renombrar y quitar columnas, pero no cambiar el tipo ni las restricciones de una existente. Usa `Schema::raw()`.
+- **Sin WebSockets, ni colas, ni cache.**
 
 ---
 
-## Cómo se mide el éxito
+## No-objetivos
 
-En orden. No por features:
+```
+ORM propio          Colas / Jobs        Scheduler
+Query builder       Event bus           Service discovery
+Relaciones          gRPC                Load balancing
+Mail                Storage / S3        Circuit breakers
+```
 
-1. ¿El código del M0 es dramáticamente mejor que Drogon pelado? *(si no → parar)*
-2. ¿Un desconocido logró `syrax new` → API corriendo sin pedir ayuda?
-3. ¿Alguien externo lo usó sin que se lo pidieras?
-4. ¿Alguien reportó un bug que sólo se encuentra usándolo en producción?
+Syrax compone; no reemplaza. Si tu proyecto necesita algo de esto, tómalo de una librería existente.
 
----
-
-## Sobre el nombre
-
-Drogon, Syrax — los dos son dragones. Drogon es el motor HTTP sobre el que esto vuela.
+**Regla de admisión:** una feature entra sólo si hace *notablemente más fácil crear una API*, y si es superficie finita. Un schema builder es finito (12 tipos de columna por 2 dialectos). Un ORM no lo es.
 
 ---
 
-## Contexto
+## Cómo funciona
 
-El alcance original de este proyecto era un framework completo de aplicaciones y sistemas
-distribuidos para C++ — 67 secciones, 10 fases, ORM propio, colas, gRPC, event bus, service
-discovery. Se descartó por tres razones:
+```
+┌──────────────────────────────────────────────────┐
+│  Tu aplicación                                   │
+├──────────────────────────────────────────────────┤
+│  SYRAX  ← ~1200 lineas                           │
+│                                                  │
+│  Ruteo con deducción de tipos desde la firma     │
+│  Binding request → struct, con validación        │
+│  Errores → respuesta JSON uniforme               │
+│  Mapeo fila de BD → struct, por reflection       │
+│  Schema builder y migraciones                    │
+│  Generación de OpenAPI                           │
+├─────────────────────────┬────────────────────────┤
+│  GLAZE                  │  DROGON                │
+│  reflection, JSON,      │  HTTP, async,          │
+│  JSON Schema            │  corrutinas, BD        │
+└─────────────────────────┴────────────────────────┘
+```
 
-1. **Ya existe.** userver (Yandex, open source) implementa esa visión y corre cientos de servicios
-   en producción.
-2. **Mal encaje cultural.** C++ adopta librerías, no frameworks que exigen reestructurar la app.
-3. **Aritmética de mantenimiento.** ~35 subsistemas propios no son sostenibles fuera de un equipo
-   financiado.
+Syrax escribe muy poco código. Las partes difíciles ya existen, son excelentes, y las mantiene alguien más.
 
-Lo que quedó es más chico, más definido y mejor apuntado: el hueco real no es "a C++ le falta un
-framework de sistemas distribuidos", es que **nadie ha logrado que hacer una API en C++ se sienta
-fácil**. Drogon es potente pero verboso. oat++ lo intentó con la ergonomía de C++ de 2018 — tipos
-propios, macros por todas partes, async anterior a las corrutinas. Glaze resolvió los tipos pero no
-sabe nada de HTTP.
+El pegamento entre ellas no existía. Eso es Syrax.
 
-El pegamento entre ellos no existe. Eso es Syrax.
+---
+
+## Licencia
+
+MIT

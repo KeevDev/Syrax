@@ -11,6 +11,16 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(SYRAX_BUILD_EXAMPLES "Build the example app" ${PROJECT_IS_TOP_LEVEL})
 option(SYRAX_BUILD_CLI      "Build the syrax CLI"   ${PROJECT_IS_TOP_LEVEL})
 
+# El CLI no enlaza contra la libreria: solo genera proyectos e invoca cmake.
+# Apagar SYRAX_BUILD_LIB evita descargar y compilar Drogon por completo, que
+# es lo que permite que instalar el comando tarde segundos y no minutos.
+option(SYRAX_BUILD_LIB "Build the syrax library (downloads Drogon + Glaze)" ON)
+
+if(SYRAX_BUILD_EXAMPLES AND NOT SYRAX_BUILD_LIB)
+    message(FATAL_ERROR "SYRAX_BUILD_EXAMPLES requiere SYRAX_BUILD_LIB=ON")
+endif()
+
+if(SYRAX_BUILD_LIB)
 include(FetchContent)
 
 # --- Glaze: reflection, JSON, JSON Schema ---------------------------------
@@ -45,6 +55,9 @@ target_include_directories(syrax INTERFACE
 target_compile_features(syrax INTERFACE cxx_std_23)
 target_link_libraries(syrax INTERFACE drogon glaze::glaze)
 
+install(DIRECTORY include/ DESTINATION include)
+endif()  # SYRAX_BUILD_LIB
+
 if(SYRAX_BUILD_CLI)
     add_subdirectory(cli)
 endif()
@@ -52,5 +65,3 @@ endif()
 if(SYRAX_BUILD_EXAMPLES)
     add_subdirectory(example)
 endif()
-
-install(DIRECTORY include/ DESTINATION include)

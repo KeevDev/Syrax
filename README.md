@@ -22,6 +22,52 @@ Syrax posee cinco cosas. El resto es tuyo.
 
 ---
 
+## Instalacion
+
+```bash
+git clone https://github.com/KeevDev/Syrax.git
+cd Syrax
+./install.sh
+```
+
+Instala el comando `syrax` en `~/.local/bin` — sin sudo. Tarda **unos segundos**:
+el CLI no enlaza contra la libreria, asi que no descarga ni compila Drogon.
+
+```bash
+./install.sh --prefix /usr/local   # otro destino
+./install.sh --add-to-path         # ademas lo agrega a tu shell rc
+./install.sh --uninstall           # lo quita
+```
+
+Requiere CMake 3.25+, git y un compilador con C++23 (GCC 14+ o Clang 17+).
+
+### Primer proyecto
+
+```bash
+syrax new mi-api
+cd mi-api
+syrax serve
+```
+
+```
+$ curl localhost:8080/hello/kevin
+{"message":"hello, kevin"}
+```
+
+La primera compilacion tarda ~3 minutos porque baja y compila Drogon; las
+siguientes son de segundos.
+
+### Comandos
+
+| | |
+|---|---|
+| `syrax new <nombre>` | crea un proyecto |
+| `syrax build` | configura y compila |
+| `syrax serve [--port N]` | compila y levanta el servidor |
+| `syrax version` | version instalada |
+
+---
+
 ## El problema
 
 Un endpoint en Drogon hoy:

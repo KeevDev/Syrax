@@ -13,7 +13,7 @@ app.post("/users", [](requests::CreateUser body) -> Task<Result<UserResource>> {
 
 Eso es un endpoint completo: parseo del body, validación, manejo de errores, serialización de la respuesta y documentación OpenAPI. Sin macros, sin heredar de nada, sin anotaciones.
 
-> **Estado: funcional, pre-1.0.** El CRUD, las migraciones, la base de datos y OpenAPI funcionan y están cubiertos por tests. La API puede cambiar sin aviso hasta la 1.0.
+> **Estado: funcional, pre-1.0.** El CRUD, la validación, las migraciones, la base de datos, los WebSockets y OpenAPI funcionan y están cubiertos por tests. La API puede cambiar sin aviso hasta la 1.0.
 
 ---
 
@@ -108,7 +108,47 @@ El body se parsea en modo estricto antes de que el handler se ejecute. Si algo n
 | Tipo incorrecto | `parse_number_failure` |
 | JSON malformado | posición exacta del error |
 
-> Esto valida la **forma** del JSON, no el contenido. Constraints por campo (largo mínimo, formato de email, rangos) todavía no existen — ver [Limitaciones](#limitaciones-conocidas).
+Eso valida la **forma**. Para el **contenido**, el struct declara sus reglas:
+
+```cpp
+struct CreateUser {
+    std::string name;
+    std::string email;
+    int         age;
+
+    static auto rules() {
+        return syrax::rules(
+            field(&CreateUser::name).notEmpty().minLen(2).maxLen(80),
+            field(&CreateUser::email).email(),
+            field(&CreateUser::age).range(0, 130));
+    }
+};
+```
+
+`rules()` es opcional: sin él, la validación sigue siendo solo estructural.
+
+Se reportan **todos** los fallos, no el primero:
+
+```json
+{"error":{"status":422,"message":"validation failed","fields":[
+  {"field":"name",  "message":"debe tener al menos 2 caracteres"},
+  {"field":"email", "message":"no es un email valido"},
+  {"field":"age",   "message":"debe estar entre 0 y 130"}]}}
+```
+
+| | |
+|---|---|
+| Texto | `notEmpty()` `minLen(n)` `maxLen(n)` `email()` `oneOf({...})` `pattern(re, msg)` |
+| Números | `min(n)` `max(n)` `range(lo, hi)` |
+| Lo demás | `satisfies(predicado, msg)` |
+
+Tres detalles que no son accidentales:
+
+- **El campo se nombra con `&T::campo`, no con un string.** Renombrarlo rompe la compilación en vez de dejar una regla apuntando a algo que ya no existe.
+- **Las reglas se encadenan como métodos** en vez de ser funciones sueltas. Dentro de `rules()` los nombres de los campos tapan a los de namespace, así que un campo llamado `email` volvía inutilizable a una función `email()`. Después de un punto no hay colisión posible.
+- **Los límites entran solos al `/docs`.** `minLen(2)` se vuelve `minLength: 2` en el JSON Schema, `email()` se vuelve `format: email`. No hay nada que mantener en paralelo.
+
+Un `std::optional<T>` ausente no se valida: "no vino" es asunto de presencia, no de contenido.
 
 ### Base de datos sin ORM ni boilerplate
 
@@ -174,6 +214,22 @@ syrax migrate:rollback   # revierte la ultima
 
 El estado se registra en la tabla `syrax_migrations`. `Schema::raw()` es el escape hatch para SQL que el builder no cubre.
 
+Para **modificar** una columna que ya existe, `.change()` al final del encadenado:
+
+```cpp
+schema.table("users", [](Blueprint& t) {
+    t.string("email", 320).nullable().change();   // cambia tipo y nulabilidad
+    t.integer("age").defaultTo("0").change();
+    t.integer("code").nullable().castUsing("code::integer").change();
+
+    t.check("age_no_negativa", "age >= 0");
+    t.dropUnique("email");
+    t.dropConstraint("vieja");
+});
+```
+
+> **`.change()` solo funciona en Postgres.** SQLite únicamente soporta `RENAME`, `ADD COLUMN` y `DROP COLUMN`; cambiar un tipo exige reconstruir la tabla entera. Syrax lanza un error que lo dice y apunta a `Schema::raw()` en vez de generar SQL que el motor va a rechazar. Es una limitación de SQLite, no de Syrax.
+
 ### OpenAPI automático
 
 `/openapi.json` y `/docs` con Swagger UI, generados de las rutas registradas. **Los esquemas salen de los mismos tipos que usan los handlers**, así que la documentación no puede desincronizarse del código: no hay anotaciones que mantener.
@@ -182,6 +238,77 @@ El estado se registra en la tabla `syrax_migrations`. `Schema::raw()` es el esca
 app.docs("Mi API", "2.0.0");   // titulo y version
 app.withoutDocs();             // apagarlo en produccion
 ```
+
+### Middleware, autenticación y políticas
+
+Un middleware es una función que recibe la petición y devuelve un `Error` para cortar, o nada para dejar pasar. Sin clases, sin registro global:
+
+```cpp
+app.useOnResponse(securityHeaders());                    // a toda respuesta
+app.use(rateLimit(100, std::chrono::minutes{1}));        // a toda petición
+app.use("/api/v1/admin", auth::bearer(secreto));         // solo bajo ese prefijo
+app.cors({.origins = {"https://mi-front.com"}});
+```
+
+También hay `requireApiKey(clave)`, que compara en tiempo constante.
+
+**JWT y contraseñas** (HS256 y PBKDF2-SHA256 sobre OpenSSL):
+
+```cpp
+const auto token  = auth::sign({.sub = "42", .role = "admin"}, secreto);
+const auto claims = auth::verify(token, secreto);        // optional<Claims>
+
+const auto hash = auth::hashPassword("secreto");         // 600 000 iteraciones
+const bool ok   = auth::verifyPassword("secreto", hash);
+```
+
+`auth::bearer()` verifica el token y deja el sujeto y el rol en la petición. De ahí sale el actor:
+
+```cpp
+app.post("/posts/{id}", [](Request req, std::int64_t id, UpdatePost body)
+                         -> Task<Result<PostResource>> {
+    const auto actor = actorFrom(req);
+
+    if (auto denied = requireRole(actor, "admin", "editor")) co_return *denied;
+    // ...
+});
+```
+
+Una **política** es solo una función que devuelve `optional<Error>`. No hay registro ni resolución por nombre:
+
+```cpp
+namespace policies {
+std::optional<Error> update(const Actor& actor, const Post& post) {
+    if (actor.is("admin"))         return std::nullopt;
+    if (post.authorId == actor.id) return std::nullopt;
+    return Forbidden("no puedes editar este post");
+}
+}
+
+if (auto denied = policies::update(actor, post)) co_return *denied;
+```
+
+`requireRole` distingue **401** (no autenticado) de **403** (rol insuficiente); confundirlos le dice a un atacante si una credencial es válida. `allowIf` y `denyIf` cubren las condiciones sueltas.
+
+Un sistema completo de roles y permisos es una aplicación, no un framework: esto es lo mínimo para escribirlo sin pelearse.
+
+### WebSockets
+
+```cpp
+syrax::Room sala;
+
+app.ws("/chat", {
+    .onOpen    = [&](const Socket& s) { sala.join(s); },
+    .onMessage = [&](const Socket&, std::string_view text) { sala.broadcast(text); },
+    .onClose   = [&](const Socket& s) { sala.leave(s); },
+});
+```
+
+`Room` es un grupo de conexiones al que se emite de una vez, con su sincronización resuelta: Drogon reparte las conexiones entre varios event loops, así que sin esto cada proyecto tendría que rehacer el registro y su mutex.
+
+`Socket` trae `send`, `sendJson` (el mismo struct que sirve un endpoint REST sirve un mensaje de socket), `close`, `ip` y `set`/`get` para estado por conexión — lo típico es guardar ahí el usuario que quedó autenticado en `onOpen`.
+
+Los middlewares de Syrax **no** corren sobre sockets: operan sobre respuestas HTTP, y un socket deja de tenerlas después del handshake. La autenticación va dentro de `onOpen`.
 
 ---
 
@@ -247,7 +374,7 @@ syrax test                     # en el repo de Syrax
 ctest --test-dir build         # equivalente
 ```
 
-47 casos cubriendo el generador de DDL en ambos dialectos, `ALTER TABLE` ejecutado contra SQLite real, el mapeo de filas a structs, la generación de OpenAPI, y la integración HTTP completa: ruteo, binding de body, errores de validación, path params, corrutinas y el 404 en JSON.
+100 casos cubriendo el generador de DDL en ambos dialectos, `ALTER TABLE` ejecutado contra SQLite real, el mapeo de filas a structs, las reglas de validación y su anotación del JSON Schema, la generación de OpenAPI, JWT y hashing de contraseñas, middlewares y políticas, la integración HTTP completa (ruteo, binding de body, 422 con detalle por campo, path params, corrutinas, el 404 y el 500 en JSON) y los WebSockets hablando el protocolo a mano contra el servidor real.
 
 CI en GitHub Actions compila y corre la suite en cada push y PR.
 
@@ -257,14 +384,12 @@ CI en GitHub Actions compila y corre la suite en cada push y PR.
 
 Las digo aquí en vez de que las descubras tú:
 
-- **Sin constraints por campo.** La validación es estructural (forma del JSON), no semántica. `MinLen`, `Email`, `Range` están planeados pero no existen.
-- **Sin middleware.** Ni autenticación, ni CORS, ni rate limiting.
-- **El Dockerfile no se ha construido end-to-end.** Los nombres de paquete se verificaron contra packages.debian.org, pero en la máquina donde se escribió los contenedores no alcanzan los repos de Debian.
-- **`syrax migrate` compila.** Las migraciones son C++, así que hay un build de por medio.
-- **Sin ALTER de constraints.** Se pueden agregar, renombrar y quitar columnas, pero no cambiar el tipo ni las restricciones de una existente. Usa `Schema::raw()`.
-- **Sin WebSockets, ni colas, ni cache.**
-
----
+- **`.change()` de columnas solo en Postgres.** SQLite no tiene `ALTER COLUMN`: cambiar un tipo o una restricción exige reconstruir la tabla. Syrax lanza un error que lo explica en vez de generar SQL que el motor va a rechazar.
+- **`syrax migrate` compila.** Las migraciones son C++, así que hay un build de por medio. Es el precio de que una migración pueda usar tus tipos y que un error de esquema lo atrape el compilador; con `ccache` la recompilación es de segundos.
+- **Un middleware no ve el body *tipado*.** Corre antes del parseo: alcanza los bytes crudos por `request.drogon()->getBody()`, pero no el struct ya validado. Para reglas que dependen del contenido está `rules()`.
+- **`Room` es de un solo proceso.** Un broadcast alcanza a las conexiones de *esta* instancia. Con varias réplicas detrás de un balanceador hace falta un bus externo, que Syrax no trae.
+- **Sin colas ni cache.** Son [no-objetivos](#no-objetivos) deliberados, no pendientes.
+- **Pre-1.0.** La API puede cambiar sin aviso.
 
 ## No-objetivos
 
@@ -273,6 +398,7 @@ ORM propio          Colas / Jobs        Scheduler
 Query builder       Event bus           Service discovery
 Relaciones          gRPC                Load balancing
 Mail                Storage / S3        Circuit breakers
+                    Cache distribuida   Broker de sockets
 ```
 
 Syrax compone; no reemplaza. Si tu proyecto necesita algo de esto, tómalo de una librería existente.

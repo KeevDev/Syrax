@@ -42,3 +42,30 @@ TEST_CASE("requireRole acepta varios roles", "[policy]") {
     CHECK_FALSE(requireRole(editor, "admin", "editor").has_value());
     CHECK(requireRole(editor, "admin", "owner").has_value());
 }
+
+TEST_CASE("actorFrom lee lo que dejo el middleware de bearer", "[policy]") {
+    auto request = drogon::HttpRequest::newHttpRequest();
+    request->attributes()->insert("auth.sub", std::string{"42"});
+    request->attributes()->insert("auth.role", std::string{"admin"});
+
+    syrax::Request wrapped{request};
+    const auto     actor = syrax::actorFrom(wrapped);
+
+    CHECK(actor.id == "42");
+    CHECK(actor.role == "admin");
+    CHECK(actor.authenticated());
+    CHECK(actor.is("admin"));
+}
+
+TEST_CASE("sin token, actorFrom da un actor no autenticado", "[policy]") {
+    auto           request = drogon::HttpRequest::newHttpRequest();
+    syrax::Request wrapped{request};
+
+    // No lanza ni devuelve 401: que la ausencia sea un error lo decide la
+    // politica, no el helper. Una ruta publica puede querer saber quien mira.
+    const auto actor = syrax::actorFrom(wrapped);
+
+    CHECK_FALSE(actor.authenticated());
+    CHECK(syrax::requireRole(actor, "admin").has_value());
+    CHECK(syrax::requireRole(actor, "admin")->status == 401);
+}

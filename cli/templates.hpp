@@ -201,12 +201,10 @@ inline constexpr std::string_view kDockerfile = R"T(# Build y runtime separados:
 # Ambas etapas usan la misma base para que las versiones de las librerias
 # compartidas coincidan.
 #
-# NOTA: este Dockerfile no se ha podido construir end-to-end. En la maquina
-# donde se escribio, los contenedores no alcanzan los repos de Debian (un
-# proxy en 172.16.50.1:8090 intercepta el trafico a nivel de red, y no se
-# sortea ni con --network=host ni vaciando http_proxy). Los nombres de
-# paquete se verificaron contra packages.debian.org, pero el build completo
-# sigue sin comprobarse.
+# Este Dockerfile se construye en cada push desde el CI de Syrax, que ademas
+# arranca la imagen y le pega a /health. Si falla en tu maquina y no en el CI,
+# lo primero que hay que mirar es si tu demonio de Docker alcanza los repos
+# de Debian.
 #
 # Si `apt-get install` falla en la etapa runtime por un nombre de paquete,
 # comprueba el soname en tu version de Debian:
@@ -546,22 +544,39 @@ struct User {
 
 inline constexpr std::string_view kRequestsUser = R"T(#pragma once
 
+#include <syrax/syrax.hpp>
+
 #include <string>
 
 namespace requests {
 
 // Lo que entra por el body. Syrax lo parsea y valida antes de que el
-// controlador se ejecute: si falta un campo o el tipo no cuadra, el cliente
-// recibe un 422 y el handler nunca corre.
+// controlador se ejecute: si falta un campo, el tipo no cuadra o alguna regla
+// no se cumple, el cliente recibe un 422 y el handler nunca corre.
+//
+// rules() es opcional. Sin el, la validacion es solo estructural: que el JSON
+// tenga los campos declarados y con el tipo correcto. Con el, ademas se
+// comprueba el contenido, y los limites aparecen solos en /docs.
 struct CreateUser {
     std::string name;
     std::string email;
     int         age;
+
+    static auto rules() {
+        return syrax::rules(syrax::field(&CreateUser::name).notEmpty().minLen(2).maxLen(80),
+                            syrax::field(&CreateUser::email).email(),
+                            syrax::field(&CreateUser::age).range(0, 130));
+    }
 };
 
 struct UpdateUser {
     std::string name;
     std::string email;
+
+    static auto rules() {
+        return syrax::rules(syrax::field(&UpdateUser::name).notEmpty().minLen(2).maxLen(80),
+                            syrax::field(&UpdateUser::email).email());
+    }
 };
 
 }  // namespace requests

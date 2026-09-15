@@ -1,5 +1,6 @@
 #pragma once
 
+#include <syrax/middleware.hpp>
 #include <syrax/result.hpp>
 
 #include <functional>
@@ -45,6 +46,17 @@ inline std::optional<Error> allowIf(bool condition, std::string message = "forbi
 
 inline std::optional<Error> denyIf(bool condition, std::string message = "forbidden") {
     return allowIf(!condition, std::move(message));
+}
+
+// Construye el Actor con lo que dejo el middleware auth::bearer() en la
+// peticion. Es el unico punto de union entre autenticacion y autorizacion:
+// bearer() verifica el token, esto lo convierte en algo sobre lo que decidir.
+//
+// Sin token, devuelve un Actor no autenticado en vez de fallar: que eso sea
+// un 401 o no lo decide la politica, no este helper. Una ruta publica puede
+// querer saber quien mira sin exigirlo.
+inline Actor actorFrom(const Request& request) {
+    return Actor{.id = request.get("auth.sub"), .role = request.get("auth.role")};
 }
 
 // Exige que el actor tenga uno de los roles dados.

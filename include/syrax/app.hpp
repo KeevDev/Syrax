@@ -328,6 +328,21 @@ public:
         drogon::app().setCustom404Page(
             detail::makeError(404, "route not found"), /*set404=*/true);
 
+        // Una excepcion que se escapa del handler (una consulta contra una
+        // tabla que no existe, por ejemplo) salia como un 500 con el cuerpo
+        // VACIO: un cliente que espera JSON se encontraba con nada.
+        //
+        // El what() no viaja al cliente a proposito. Aqui decia "no such
+        // table: users", que le describe el esquema a cualquiera que provoque
+        // un error. Va al log, que es donde sirve.
+        drogon::app().setExceptionHandler(
+            [](const std::exception& error, const drogon::HttpRequestPtr& request,
+               std::function<void(const drogon::HttpResponsePtr&)>&& callback) {
+                LOG_ERROR << "excepcion sin atrapar en " << request->path() << ": "
+                          << error.what();
+                callback(detail::makeError(500, "internal server error"));
+            });
+
         // El banner se imprime cuando el listener ya esta arriba, no antes:
         // si el puerto esta ocupado no tiene sentido anunciar una URL que no
         // responde.

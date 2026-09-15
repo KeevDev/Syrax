@@ -5,6 +5,7 @@
 #include <catch2/reporters/catch_reporter_registrars.hpp>
 
 #include <atomic>
+#include <stdexcept>
 #include <chrono>
 #include <mutex>
 #include <thread>
@@ -80,6 +81,11 @@ void ensureServer() {
 
             app.del("/things/{id}", [](std::int64_t id) -> Result<Thing> {
                 return Thing{.id = id, .name = "borrado"};
+            });
+
+            // Handler que lanza: comprueba que el borde traduce la excepcion.
+            app.get("/explota", []() -> Result<Echo> {
+                throw std::runtime_error("tabla secreto no existe");
             });
 
             app.post("/signup", [](Signup body) -> Result<Echo> {

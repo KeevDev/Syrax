@@ -20,6 +20,11 @@ add_executable(syrax_tests
 )
 target_link_libraries(syrax_tests PRIVATE syrax::syrax Catch2::Catch2WithMain)
 
+# Solo se compila, no se ejecuta: es el guardia de que los ejemplos del
+# README siguen siendo codigo valido.
+add_library(syrax_readme_snippets OBJECT readme_snippets.cpp)
+target_link_libraries(syrax_readme_snippets PRIVATE syrax::syrax)
+
 list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
 include(Catch)
 catch_discover_tests(syrax_tests)

@@ -197,3 +197,15 @@ TEST_CASE_METHOD(Fixture, "un campo ausente sigue siendo 422 sin lista de campos
     CHECK(response.status == 422);
     CHECK_THAT(response.body, !ContainsSubstring("validation failed"));
 }
+
+TEST_CASE_METHOD(Fixture, "una excepcion sin atrapar sale como JSON, no vacia", "[http]") {
+    const auto response = request("GET", "/explota");
+
+    // El cuerpo vacio de Drogon dejaba a un cliente JSON sin nada que parsear.
+    CHECK(response.status == 500);
+    CHECK_THAT(response.body, ContainsSubstring("\"status\":500"));
+    CHECK_THAT(response.body, ContainsSubstring("internal server error"));
+
+    // El detalle se queda en el log: describia el esquema al que provoque el error.
+    CHECK_THAT(response.body, !ContainsSubstring("secreto"));
+}

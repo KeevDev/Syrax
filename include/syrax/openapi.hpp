@@ -46,6 +46,43 @@ inline std::vector<std::string> pathParams(const std::string& path) {
     return names;
 }
 
+// Glaze emite los tipos repetidos en un "$defs" y los referencia con
+// "#/$defs/int64_t", que es una ruta desde la raiz del DOCUMENTO. Al incrustar
+// cada esquema dentro de su ruta, esa raiz deja de ser la suya: la referencia
+// apunta a un sitio que no existe y Swagger UI corta con
+// 'Invalid object key "$defs"'.
+//
+// Se suben todas las definiciones a components/schemas —donde OpenAPI espera
+// los tipos compartidos— y se reescriben las referencias para que apunten
+// alli. Como el nombre lo pone el tipo, dos rutas que usen int64_t comparten
+// definicion en vez de duplicarla.
+inline void hoistDefs(Json::Value& node, Json::Value& defs) {
+    if (node.isArray()) {
+        for (auto& item : node) hoistDefs(item, defs);
+        return;
+    }
+    if (!node.isObject()) return;
+
+    if (node.isMember("$defs")) {
+        const Json::Value own = node["$defs"];
+        for (const auto& name : own.getMemberNames()) {
+            if (!defs.isMember(name)) defs[name] = own[name];
+        }
+        node.removeMember("$defs");
+    }
+
+    if (node.isMember("$ref") && node["$ref"].isString()) {
+        const std::string        ref    = node["$ref"].asString();
+        static const std::string prefix = "#/$defs/";
+
+        if (ref.starts_with(prefix)) {
+            node["$ref"] = "#/components/schemas/" + ref.substr(prefix.size());
+        }
+    }
+
+    for (const auto& name : node.getMemberNames()) hoistDefs(node[name], defs);
+}
+
 inline Json::Value jsonContent(const std::string& schema) {
     Json::Value content;
     content["application/json"]["schema"] = parseSchema(schema);
@@ -63,6 +100,8 @@ inline std::string buildOpenApi(const std::vector<RouteInfo>& routes,
     doc["info"]["title"]   = title;
     doc["info"]["version"] = version;
     doc["paths"]           = Json::objectValue;
+
+    Json::Value defs = Json::objectValue;
 
     for (const auto& route : routes) {
         Json::Value operation;
@@ -101,7 +140,20 @@ inline std::string buildOpenApi(const std::vector<RouteInfo>& routes,
             operation["responses"][code]["content"]     = errorContent;
         }
 
+        detail::hoistDefs(operation, defs);
         doc["paths"][route.path][route.method] = operation;
+    }
+
+    // Una definicion puede referenciar a otra: se reescriben tambien por
+    // dentro, y lo que aparezca de nuevo se suma al mismo sitio.
+    if (!defs.empty()) {
+        Json::Value nested = Json::objectValue;
+        for (const auto& name : defs.getMemberNames()) detail::hoistDefs(defs[name], nested);
+
+        for (const auto& name : nested.getMemberNames()) {
+            if (!defs.isMember(name)) defs[name] = nested[name];
+        }
+        doc["components"]["schemas"] = defs;
     }
 
     Json::StreamWriterBuilder writer;

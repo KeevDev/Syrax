@@ -112,3 +112,55 @@ TEST_CASE("un esquema invalido no rompe el documento", "[openapi]") {
     const auto doc = parse(buildOpenApi(routes, "API", "1.0.0"));
     CHECK(doc["paths"]["/users"]["get"]["responses"].isMember("200"));
 }
+
+TEST_CASE("los $defs de Glaze suben a components/schemas", "[openapi]") {
+    // Tal cual lo emite Glaze para un struct con un int64_t: la referencia
+    // apunta a la raiz del documento, no a la del esquema incrustado.
+    const std::string schema =
+        R"({"type":"array","items":{"type":"object","properties":{)"
+        R"("id":{"$ref":"#/$defs/int64_t"},"name":{"type":"string"}}},)"
+        R"("$defs":{"int64_t":{"type":"integer"}}})";
+
+    const std::vector<RouteInfo> routes{
+        {.method = "get", .path = "/users", .responseSchema = schema, .okStatus = 200}};
+
+    const auto doc = parse(buildOpenApi(routes, "API", "1.0.0"));
+    const auto& body =
+        doc["paths"]["/users"]["get"]["responses"]["200"]["content"]["application/json"]["schema"];
+
+    // Si esto se queda como estaba, Swagger UI corta con
+    // 'Invalid object key "$defs"' al resolver la referencia.
+    CHECK(body["items"]["properties"]["id"]["$ref"].asString() ==
+          "#/components/schemas/int64_t");
+    CHECK_FALSE(body.isMember("$defs"));
+
+    REQUIRE(doc["components"]["schemas"].isMember("int64_t"));
+    CHECK(doc["components"]["schemas"]["int64_t"]["type"].asString() == "integer");
+}
+
+TEST_CASE("dos rutas que usan el mismo tipo comparten una sola definicion", "[openapi]") {
+    const std::string schema =
+        R"({"type":"object","properties":{"id":{"$ref":"#/$defs/int64_t"}},)"
+        R"("$defs":{"int64_t":{"type":"integer"}}})";
+
+    const std::vector<RouteInfo> routes{
+        {.method = "get", .path = "/users", .responseSchema = schema, .okStatus = 200},
+        {.method = "get", .path = "/posts", .responseSchema = schema, .okStatus = 200}};
+
+    const auto doc = parse(buildOpenApi(routes, "API", "1.0.0"));
+
+    CHECK(doc["components"]["schemas"].getMemberNames().size() == 1);
+    CHECK(doc["paths"]["/posts"]["get"]["responses"]["200"]["content"]["application/json"]
+             ["schema"]["properties"]["id"]["$ref"]
+                 .asString() == "#/components/schemas/int64_t");
+}
+
+TEST_CASE("sin $defs no aparece un components vacio", "[openapi]") {
+    const std::vector<RouteInfo> routes{
+        {.method = "get", .path = "/health", .responseSchema = R"({"type":"object"})",
+         .okStatus = 200}};
+
+    const auto doc = parse(buildOpenApi(routes, "API", "1.0.0"));
+
+    CHECK_FALSE(doc.isMember("components"));
+}

@@ -73,6 +73,9 @@ bool writeFile(const fs::path& path, std::string_view content) {
 }
 
 int run(const std::string& cmd) {
+    std::cout.flush();
+    std::cerr.flush();
+
     const int rc = std::system(cmd.c_str());
     return (rc == -1) ? 1 : WEXITSTATUS(rc);
 }
@@ -314,7 +317,7 @@ int cmdMigrate(const std::string& sub) {
         return 1;
     }
 
-    std::cout << "\n" << sub << "\n";
+    std::cout << "\n" << sub << "\n\n";
     return run("./" + bin.string() + " " + sub);
 }
 

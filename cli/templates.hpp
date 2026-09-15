@@ -29,6 +29,15 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# ccache acelera muchisimo las recompilaciones de las dependencias: Drogon
+# son ~200 objetos y sin cache se rehacen enteros ante cualquier cambio de
+# configuracion.
+find_program(CCACHE ccache)
+if(CCACHE)
+    set(CMAKE_CXX_COMPILER_LAUNCHER ${CCACHE})
+    message(STATUS "ccache: ${CCACHE}")
+endif()
+
 include(FetchContent)
 FetchContent_Declare(syrax
     GIT_REPOSITORY @REPO@

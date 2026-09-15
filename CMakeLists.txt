@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(syrax LANGUAGES CXX VERSION 0.1.1)
+project(syrax LANGUAGES CXX VERSION 0.1.2)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -44,6 +44,16 @@ FetchContent_Declare(drogon
 )
 
 FetchContent_MakeAvailable(glaze drogon)
+
+# Los warnings de Drogon no son nuestros y no los podemos arreglar: son ruido
+# que esconde los errores propios. Se silencian sin tocar los del codigo del
+# usuario.
+if(TARGET drogon)
+    target_compile_options(drogon PRIVATE -w)
+endif()
+if(TARGET trantor)
+    target_compile_options(trantor PRIVATE -w)
+endif()
 
 # --- Syrax: header-only ----------------------------------------------------
 add_library(syrax INTERFACE)

@@ -303,6 +303,7 @@ public:
     }
 
     int migrate() {
+        if (!checkConnection()) return 1;
         ensureControlTable();
 
         int applied = 0;
@@ -328,6 +329,7 @@ public:
 
     // Revierte la ultima migracion aplicada.
     int rollback() {
+        if (!checkConnection()) return 1;
         ensureControlTable();
 
         const auto result =
@@ -360,6 +362,7 @@ public:
     }
 
     int status() {
+        if (!checkConnection()) return 1;
         ensureControlTable();
 
         for (const auto& migration : migrations_) {
@@ -370,6 +373,33 @@ public:
     }
 
 private:
+    // Drogon reintenta la conexion en bucle y escupe el mismo error cada
+    // segundo, sin decir que revisar. Una consulta trivial primero convierte
+    // ese muro de ruido en un mensaje accionable.
+    bool checkConnection() {
+        try {
+            client_->execSqlSync("SELECT 1");
+            return true;
+        } catch (const std::exception& e) {
+            std::cerr << "\nerror: no pude conectar a la base de datos.\n\n";
+
+            if (sqlite_) {
+                std::cerr << "  archivo: " << db::env("DB_FILE", "app.db") << "\n";
+            } else {
+                std::cerr << "  host:     " << db::env("DB_HOST", "127.0.0.1") << ":"
+                          << db::env("DB_PORT", "5432") << "\n"
+                          << "  base:     " << db::env("DB_NAME", "app") << "\n"
+                          << "  usuario:  " << db::env("DB_USER", "postgres") << "\n\n"
+                          << "  Revisa DB_* en tu .env. Si el puerto lo ocupa otro postgres\n"
+                          << "  (es comun tener varios locales), cambia DB_PORT y reinicia\n"
+                          << "  el contenedor con: docker compose down && docker compose up -d\n";
+            }
+
+            std::cerr << "\n  detalle: " << e.what() << "\n\n";
+            return false;
+        }
+    }
+
     std::string placeholder(int n) const {
         return sqlite_ ? "?" : "$" + std::to_string(n);
     }

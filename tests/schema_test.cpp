@@ -3,6 +3,8 @@
 
 #include <syrax/migration.hpp>
 
+#include <stdexcept>
+
 using Catch::Matchers::ContainsSubstring;
 using syrax::Blueprint;
 using syrax::Dialect;
@@ -101,4 +103,76 @@ TEST_CASE("drop y raw", "[schema]") {
     REQUIRE(schema.statements().size() == 2);
     CHECK_THAT(schema.statements()[0], ContainsSubstring("DROP TABLE IF EXISTS \"users\""));
     CHECK(schema.statements()[1] == "PRAGMA foreign_keys = ON");
+}
+
+// ---------------------------------------------------------------- ALTER
+
+namespace {
+
+std::string alterDdl(Dialect dialect, const std::function<void(Blueprint&)>& build) {
+    Schema schema{dialect};
+    schema.table("users", build);
+
+    std::string all;
+    for (const auto& statement : schema.statements()) all += statement + ";\n";
+    return all;
+}
+
+}  // namespace
+
+TEST_CASE("table() agrega columnas con ADD COLUMN", "[schema][alter]") {
+    const auto sql = alterDdl(Dialect::Postgres,
+                              [](Blueprint& t) { t.string("phone").nullable(); });
+
+    CHECK_THAT(sql, ContainsSubstring("ALTER TABLE \"users\" ADD COLUMN \"phone\" VARCHAR(255)"));
+}
+
+TEST_CASE("agregar NOT NULL sin DEFAULT es un error explicito", "[schema][alter]") {
+    // Falla en ambos motores si la tabla tiene filas. Mejor un mensaje claro
+    // aqui que un error de SQL cripto en produccion.
+    CHECK_THROWS_AS(alterDdl(Dialect::Postgres, [](Blueprint& t) { t.string("phone"); }),
+                    std::logic_error);
+
+    CHECK_NOTHROW(alterDdl(Dialect::Postgres, [](Blueprint& t) { t.string("phone").nullable(); }));
+    CHECK_NOTHROW(
+        alterDdl(Dialect::Postgres, [](Blueprint& t) { t.string("phone").defaultTo("''"); }));
+}
+
+TEST_CASE("dropColumn y renameColumn", "[schema][alter]") {
+    const auto sql = alterDdl(Dialect::Sqlite, [](Blueprint& t) {
+        t.dropColumn("age");
+        t.renameColumn("name", "full_name");
+    });
+
+    CHECK_THAT(sql, ContainsSubstring("DROP COLUMN \"age\""));
+    CHECK_THAT(sql, ContainsSubstring("RENAME COLUMN \"name\" TO \"full_name\""));
+}
+
+TEST_CASE("los renames van antes que los ADD COLUMN", "[schema][alter]") {
+    // Para poder renombrar una columna y agregar otra con el nombre viejo en
+    // la misma migracion sin que choquen.
+    Schema schema{Dialect::Postgres};
+    schema.table("users", [](Blueprint& t) {
+        t.string("name").nullable();
+        t.renameColumn("name", "old_name");
+    });
+
+    REQUIRE(schema.statements().size() == 2);
+    CHECK_THAT(schema.statements()[0], ContainsSubstring("RENAME COLUMN"));
+    CHECK_THAT(schema.statements()[1], ContainsSubstring("ADD COLUMN"));
+}
+
+TEST_CASE("rename() cambia el nombre de la tabla", "[schema][alter]") {
+    Schema schema{Dialect::Postgres};
+    schema.rename("users", "people");
+
+    REQUIRE(schema.statements().size() == 1);
+    CHECK_THAT(schema.statements()[0],
+               ContainsSubstring("ALTER TABLE \"users\" RENAME TO \"people\""));
+}
+
+TEST_CASE("dropIndex quita el indice por convencion de nombre", "[schema][alter]") {
+    const auto sql = alterDdl(Dialect::Postgres, [](Blueprint& t) { t.dropIndex("email"); });
+
+    CHECK_THAT(sql, ContainsSubstring("DROP INDEX IF EXISTS \"idx_users_email\""));
 }

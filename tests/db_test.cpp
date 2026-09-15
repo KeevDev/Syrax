@@ -2,6 +2,7 @@
 
 #include <drogon/orm/DbClient.h>
 #include <syrax/db.hpp>
+#include <syrax/migration.hpp>
 
 #include <unistd.h>
 
@@ -134,4 +135,36 @@ TEST_CASE("loadDotEnv no pisa variables que ya existen", "[db]") {
 
 TEST_CASE("env devuelve el fallback si la variable no existe", "[db]") {
     CHECK(syrax::db::env("SYRAX_NO_EXISTE_JAMAS", "fallback") == "fallback");
+}
+
+TEST_CASE("el SQL de ALTER se ejecuta de verdad en sqlite", "[db][alter]") {
+    // Generar SQL plausible no basta: hay que comprobar que el motor lo acepta.
+    TempDb db;
+
+    syrax::Schema create{syrax::Dialect::Sqlite};
+    create.create("things", [](syrax::Blueprint& t) {
+        t.id();
+        t.string("name");
+    });
+    for (const auto& sql : create.statements()) db->execSqlSync(sql);
+
+    db->execSqlSync("INSERT INTO things (name) VALUES ('uno')");
+
+    syrax::Schema alter{syrax::Dialect::Sqlite};
+    alter.table("things", [](syrax::Blueprint& t) {
+        t.string("color").defaultTo("'rojo'");
+        t.renameColumn("name", "label");
+    });
+    for (const auto& sql : alter.statements()) db->execSqlSync(sql);
+
+    const auto row = db->execSqlSync("SELECT id, label, color FROM things").front();
+    CHECK(row["label"].as<std::string>() == "uno");
+    CHECK(row["color"].as<std::string>() == "rojo");
+
+    // Y que el DROP tambien se aplica.
+    syrax::Schema drop{syrax::Dialect::Sqlite};
+    drop.table("things", [](syrax::Blueprint& t) { t.dropColumn("color"); });
+    for (const auto& sql : drop.statements()) db->execSqlSync(sql);
+
+    CHECK_THROWS(db->execSqlSync("SELECT color FROM things"));
 }

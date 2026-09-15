@@ -6,6 +6,8 @@
 #include <syrax/db.hpp>
 
 #include <functional>
+#include <stdexcept>
+#include <utility>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -43,6 +45,11 @@ public:
 
     const std::string& name() const { return name_; }
     bool               hasIndex() const { return index_; }
+
+    // NOT NULL sin DEFAULT no se puede agregar a una tabla que ya tiene filas.
+    bool requiresDefaultWhenAdded() const {
+        return !nullable_ && !primary_ && default_.empty();
+    }
 
     std::string definition(Dialect dialect) const {
         std::string sql = "\"" + name_ + "\" " +
@@ -106,8 +113,25 @@ public:
             .references(std::move(refTable), std::move(refColumn));
     }
 
+    // --- solo en modo alter (Schema::table) --------------------------------
+
+    void dropColumn(std::string name) { drops_.push_back(std::move(name)); }
+
+    void renameColumn(std::string from, std::string to) {
+        renames_.emplace_back(std::move(from), std::move(to));
+    }
+
+    void dropIndex(std::string column) { droppedIndexes_.push_back(std::move(column)); }
+
     const std::string&         table() const { return table_; }
     const std::vector<Column>& columns() const { return columns_; }
+
+    const std::vector<std::string>& drops() const { return drops_; }
+    const std::vector<std::string>& droppedIndexes() const { return droppedIndexes_; }
+
+    const std::vector<std::pair<std::string, std::string>>& renames() const {
+        return renames_;
+    }
 
 private:
     Column& add(Column column) {
@@ -120,6 +144,10 @@ private:
 
     std::string         table_;
     std::vector<Column> columns_;
+
+    std::vector<std::string>                         drops_;
+    std::vector<std::string>                         droppedIndexes_;
+    std::vector<std::pair<std::string, std::string>> renames_;
 };
 
 // ---------------------------------------------------------------- Schema
@@ -154,6 +182,61 @@ public:
 
     void drop(const std::string& table) {
         statements_.push_back("DROP TABLE IF EXISTS \"" + table + "\"");
+    }
+
+    // Modifica una tabla existente.
+    //
+    //   schema.table("users", [](Blueprint& t) {
+    //       t.string("phone").nullable();
+    //       t.dropColumn("age");
+    //       t.renameColumn("name", "full_name");
+    //   });
+    //
+    // Los renames van primero para que puedas renombrar y agregar en la misma
+    // migracion sin que choquen los nombres.
+    void table(const std::string& name, const std::function<void(Blueprint&)>& build) {
+        Blueprint blueprint{name};
+        build(blueprint);
+
+        for (const auto& [from, to] : blueprint.renames()) {
+            statements_.push_back("ALTER TABLE \"" + name + "\" RENAME COLUMN \"" + from +
+                                  "\" TO \"" + to + "\"");
+        }
+
+        for (const auto& column : blueprint.columns()) {
+            // Agregar una columna NOT NULL a una tabla con filas falla en
+            // postgres y en sqlite si no hay DEFAULT. Se detecta aqui para dar
+            // un mensaje util en vez de un error de SQL cripto.
+            if (column.requiresDefaultWhenAdded()) {
+                throw std::logic_error(
+                    "syrax: la columna '" + column.name() + "' de la tabla '" + name +
+                    "' es NOT NULL sin DEFAULT. Al agregarla a una tabla existente "
+                    "usa .nullable() o .defaultTo(...)");
+            }
+
+            statements_.push_back("ALTER TABLE \"" + name + "\" ADD COLUMN " +
+                                  column.definition(dialect_));
+        }
+
+        for (const auto& column : blueprint.drops()) {
+            statements_.push_back("ALTER TABLE \"" + name + "\" DROP COLUMN \"" + column + "\"");
+        }
+
+        for (const auto& column : blueprint.droppedIndexes()) {
+            statements_.push_back("DROP INDEX IF EXISTS \"idx_" + name + "_" + column + "\"");
+        }
+
+        for (const auto& column : blueprint.columns()) {
+            if (!column.hasIndex()) continue;
+
+            statements_.push_back("CREATE INDEX IF NOT EXISTS \"idx_" + name + "_" +
+                                  column.name() + "\" ON \"" + name + "\" (\"" +
+                                  column.name() + "\")");
+        }
+    }
+
+    void rename(const std::string& from, const std::string& to) {
+        statements_.push_back("ALTER TABLE \"" + from + "\" RENAME TO \"" + to + "\"");
     }
 
     // Escape hatch: cuando el builder no alcanza, SQL crudo.

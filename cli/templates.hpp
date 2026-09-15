@@ -192,6 +192,13 @@ inline constexpr std::string_view kDockerfile = R"T(# Build y runtime separados:
 # Ambas etapas usan la misma base para que las versiones de las librerias
 # compartidas coincidan.
 #
+# NOTA: este Dockerfile no se ha podido construir end-to-end. En la maquina
+# donde se escribio, los contenedores no alcanzan los repos de Debian (un
+# proxy en 172.16.50.1:8090 intercepta el trafico a nivel de red, y no se
+# sortea ni con --network=host ni vaciando http_proxy). Los nombres de
+# paquete se verificaron contra packages.debian.org, pero el build completo
+# sigue sin comprobarse.
+#
 # Si `apt-get install` falla en la etapa runtime por un nombre de paquete,
 # comprueba el soname en tu version de Debian:
 #     docker run --rm debian:trixie-slim sh -c "apt-get update && apt-cache search jsoncpp"
@@ -206,7 +213,7 @@ RUN cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release     && cmake --build
 
 FROM debian:trixie-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends         libjsoncpp26 libuuid1 zlib1g libssl3 libpq5 libsqlite3-0         libcares2 libbrotli1 ca-certificates     && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends         libjsoncpp26 libuuid1 zlib1g libssl3t64 libpq5 libsqlite3-0         libc-ares2 libbrotli1 ca-certificates     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY --from=build /src/build/@NAME@ /app/@NAME@

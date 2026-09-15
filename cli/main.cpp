@@ -3,6 +3,8 @@
 // Deliberadamente sin dependencias: se compila en segundos y no arrastra
 // nada al proyecto. Su unico trabajo es generar proyectos e invocar a cmake.
 
+#include "templates.hpp"
+
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -18,58 +20,6 @@ namespace {
 
 constexpr std::string_view kDefaultRepo = "https://github.com/KeevDev/Syrax.git";
 constexpr std::string_view kDefaultTag  = "main";
-
-// ---------------------------------------------------------------- plantillas
-
-constexpr std::string_view kTplCMake = R"CMAKE(cmake_minimum_required(VERSION 3.25)
-project(@NAME@ LANGUAGES CXX)
-
-set(CMAKE_CXX_STANDARD 23)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-
-include(FetchContent)
-FetchContent_Declare(syrax
-    GIT_REPOSITORY @REPO@
-    GIT_TAG        @TAG@
-)
-FetchContent_MakeAvailable(syrax)
-
-add_executable(@NAME@ src/main.cpp)
-target_link_libraries(@NAME@ PRIVATE syrax::syrax)
-)CMAKE";
-
-constexpr std::string_view kTplMain = R"CPP(#include <syrax/syrax.hpp>
-
-#include <cstdint>
-#include <cstdlib>
-#include <string>
-
-using namespace syrax;
-
-struct Greeting {
-    std::string message;
-};
-
-int main(int argc, char** argv) {
-    const auto port = static_cast<std::uint16_t>(argc > 1 ? std::atoi(argv[1]) : 8080);
-
-    App app;
-
-    app.get("/hello/{name}", [](std::string name) -> Result<Greeting> {
-        if (name.empty()) return BadRequest("name is required");
-        return Greeting{.message = "hello, " + name};
-    });
-
-    app.run(port);
-}
-)CPP";
-
-constexpr std::string_view kTplGitignore = R"GI(build/
-.cache/
-compile_commands.json
-uploads/
-)GI";
 
 // ------------------------------------------------------------------ utilidades
 
@@ -146,23 +96,20 @@ int cmdNew(const std::string& name) {
 
     const auto repo = envOr("SYRAX_REPO", kDefaultRepo);
     const auto tag  = envOr("SYRAX_TAG", kDefaultTag);
+    const fs::path root{name};
 
-    fs::create_directories(fs::path(name) / "src");
+    for (const auto& file : tpl::kProjectFiles) {
+        const fs::path out = root / file.path;
 
-    const bool ok =
-        writeFile(fs::path(name) / "CMakeLists.txt",
-                  substitute(kTplCMake, name, repo, tag)) &&
-        writeFile(fs::path(name) / "src" / "main.cpp",
-                  substitute(kTplMain, name, repo, tag)) &&
-        writeFile(fs::path(name) / ".gitignore", kTplGitignore);
+        if (out.has_parent_path()) fs::create_directories(out.parent_path());
+        if (!writeFile(out, substitute(file.content, name, repo, tag))) return 1;
+    }
 
-    if (!ok) return 1;
-
-    std::cout << "creado " << name << "/\n"
-              << "  CMakeLists.txt\n"
-              << "  src/main.cpp\n"
-              << "  .gitignore\n\n"
-              << "siguiente paso:\n"
+    std::cout << "creado " << name << "/\n";
+    for (const auto& file : tpl::kProjectFiles) {
+        std::cout << "  " << file.path << "\n";
+    }
+    std::cout << "\nsiguiente paso:\n"
               << "  cd " << name << " && syrax serve\n";
     return 0;
 }

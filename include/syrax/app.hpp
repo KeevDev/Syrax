@@ -30,6 +30,15 @@ concept BodyLike = std::is_class_v<T> && !std::is_same_v<T, std::string>;
 // no es un body valido.
 inline constexpr glz::opts kStrict{.error_on_missing_keys = true};
 
+// Quita el ultimo elemento de una tupla de tipos. Sirve para separar
+// "los primeros N argumentos son path params, el ultimo es el body".
+template <typename Tuple, std::size_t... I>
+std::tuple<std::tuple_element_t<I, Tuple>...> dropLastHelper(std::index_sequence<I...>);
+
+template <typename Tuple>
+using DropLast = decltype(dropLastHelper<Tuple>(
+    std::make_index_sequence<std::tuple_size_v<Tuple> - 1>{}));
+
 // Los path params llegan siempre como texto; Syrax hace la conversion para
 // controlar el contrato de error en vez de dejar que Drogon lance.
 template <typename>
@@ -114,12 +123,17 @@ public:
 private:
     template <bool AllowBody, typename F>
     App& route(const std::string& path, F&& f, drogon::HttpMethod method, int okStatus) {
-        using Args = typename detail::fn_traits<std::decay_t<F>>::args;
+        using Args                 = typename detail::fn_traits<std::decay_t<F>>::args;
+        constexpr std::size_t kArity = std::tuple_size_v<Args>;
 
-        if constexpr (AllowBody && std::tuple_size_v<Args> == 1 &&
-                      detail::BodyLike<std::tuple_element_t<0, Args>>) {
-            registerBody<std::tuple_element_t<0, Args>>(
-                path, std::forward<F>(f), method, okStatus);
+        // Un handler puede pedir path params y body a la vez:
+        //   [](int64_t id, UpdateUser body) -> Result<UserResponse>
+        // El body, si lo hay, es siempre el ultimo argumento.
+        if constexpr (AllowBody && kArity >= 1 &&
+                      detail::BodyLike<std::tuple_element_t<kArity - 1, Args>>) {
+            registerWithBody<std::tuple_element_t<kArity - 1, Args>>(
+                path, std::forward<F>(f), method, okStatus,
+                static_cast<detail::DropLast<Args>*>(nullptr));
         } else {
             registerParams(path, std::forward<F>(f), method, okStatus,
                            static_cast<Args*>(nullptr));
@@ -127,19 +141,39 @@ private:
         return *this;
     }
 
-    // POST/PUT/PATCH con un struct: el body JSON se parsea y valida solo.
-    template <typename Body, typename F>
-    void registerBody(const std::string& path, F f, drogon::HttpMethod method, int okStatus) {
+    // Cero o mas path params seguidos de un body JSON.
+    template <typename Body, typename F, typename... Params>
+    void registerWithBody(const std::string& path, F f, drogon::HttpMethod method,
+                          int okStatus, std::tuple<Params...>*) {
         drogon::app().registerHandler(
             path,
-            [f, okStatus](const drogon::HttpRequestPtr& req, detail::Callback&& cb) {
-                Body       body{};
-                std::string raw{req->getBody()};
-                if (auto ec = glz::read<detail::kStrict>(body, raw)) {
-                    cb(detail::makeError(422, glz::format_error(ec, raw)));
+            [f, okStatus](const drogon::HttpRequestPtr& req, detail::Callback&& cb,
+                          detail::AsString<Params>... raws) {
+                std::tuple<std::optional<Params>...> params{
+                    detail::convertParam<Params>(raws)...};
+
+                // Con cero params el fold sobre pack vacio da true.
+                const bool paramsOk = std::apply(
+                    [](const auto&... o) { return (o.has_value() && ...); }, params);
+                if (!paramsOk) {
+                    cb(detail::makeError(400, "invalid path parameter"));
                     return;
                 }
-                detail::respond(cb, f(std::move(body)), okStatus);
+
+                Body        body{};
+                std::string rawBody{req->getBody()};
+                if (auto ec = glz::read<detail::kStrict>(body, rawBody)) {
+                    cb(detail::makeError(422, glz::format_error(ec, rawBody)));
+                    return;
+                }
+
+                detail::respond(cb,
+                                std::apply(
+                                    [&f, &body](const auto&... o) {
+                                        return f(*o..., std::move(body));
+                                    },
+                                    params),
+                                okStatus);
             },
             {method});
     }

@@ -6,6 +6,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Cuando Syrax se consume via FetchContent, el consumidor no debe pagar el
+# build del CLI ni del ejemplo.
+option(SYRAX_BUILD_EXAMPLES "Build the example app" ${PROJECT_IS_TOP_LEVEL})
+option(SYRAX_BUILD_CLI      "Build the syrax CLI"   ${PROJECT_IS_TOP_LEVEL})
+
 include(FetchContent)
 
 # --- Glaze: reflection, JSON, JSON Schema ---------------------------------
@@ -16,7 +21,7 @@ FetchContent_Declare(glaze
 )
 
 # --- Drogon: HTTP, async, corrutinas --------------------------------------
-# Apagamos todo lo que no usamos: es la diferencia entre 3 y 15 minutos de build.
+# Apagamos lo que no usamos: es la diferencia entre 3 y 15 minutos de build.
 set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(BUILD_CTL      OFF CACHE BOOL "" FORCE)
 set(BUILD_TESTING  OFF CACHE BOOL "" FORCE)
@@ -40,7 +45,12 @@ target_include_directories(syrax INTERFACE
 target_compile_features(syrax INTERFACE cxx_std_23)
 target_link_libraries(syrax INTERFACE drogon glaze::glaze)
 
-option(SYRAX_BUILD_EXAMPLES "Build the example app" ON)
+if(SYRAX_BUILD_CLI)
+    add_subdirectory(cli)
+endif()
+
 if(SYRAX_BUILD_EXAMPLES)
     add_subdirectory(example)
 endif()
+
+install(DIRECTORY include/ DESTINATION include)

@@ -41,7 +41,7 @@ FetchContent_MakeAvailable(syrax)
 file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
 
 add_executable(@NAME@ ${SOURCES})
-target_include_directories(@NAME@ PRIVATE src)
+target_include_directories(@NAME@ PRIVATE src database)
 target_link_libraries(@NAME@ PRIVATE syrax::syrax)
 )T";
 
@@ -117,6 +117,49 @@ inline constexpr std::string_view kAppConfig = R"T({
 }
 )T";
 
+inline constexpr std::string_view kSeederPostgres = R"T(-- Datos de ejemplo. Se corre con: syrax db:seed
+INSERT INTO users (name, email, age) VALUES
+    ('Ada Lovelace',  'ada@example.com',  36),
+    ('Alan Turing',   'alan@example.com', 41),
+    ('Grace Hopper',  'grace@example.com', 85)
+ON CONFLICT (email) DO NOTHING;
+)T";
+
+inline constexpr std::string_view kSeederSqlite = R"T(-- Datos de ejemplo. Se corre con: syrax db:seed
+INSERT OR IGNORE INTO users (name, email, age) VALUES
+    ('Ada Lovelace',  'ada@example.com',  36),
+    ('Alan Turing',   'alan@example.com', 41),
+    ('Grace Hopper',  'grace@example.com', 85);
+)T";
+
+inline constexpr std::string_view kUserFactory = R"T(#pragma once
+
+#include "models/User/User.hpp"
+
+#include <cstdint>
+#include <string>
+
+namespace factories {
+
+// Construye usuarios de mentira para pruebas y datos de desarrollo.
+//
+// Nota honesta: esto todavia no lo usa nadie. Cobra sentido cuando el proyecto
+// tenga tests; hoy los datos de ejemplo se cargan con `syrax db:seed`, que
+// corre database/seeders/*.sql.
+struct UserFactory {
+    static models::User make(std::int64_t id = 1) {
+        return models::User{
+            .id    = id,
+            .name  = "User " + std::to_string(id),
+            .email = "user" + std::to_string(id) + "@example.com",
+            .age   = 20 + static_cast<int>(id % 50),
+        };
+    }
+};
+
+}  // namespace factories
+)T";
+
 inline constexpr std::string_view kReadme = R"T(# @NAME@
 
 API construida con [Syrax](https://github.com/KeevDev/Syrax). Motor: **@ENGINE@**.
@@ -125,6 +168,8 @@ API construida con [Syrax](https://github.com/KeevDev/Syrax). Motor: **@ENGINE@*
 
 ```bash
 @SETUP@
+syrax migrate
+syrax db:seed     # opcional: datos de ejemplo
 syrax serve
 ```
 
@@ -139,18 +184,33 @@ curl -X POST localhost:8080/users -H 'Content-Type: application/json' \
 ```
 config/app.json           ajustes del servidor (versionado)
 .env                      credenciales (NO versionado)
-migrations/               esquema
+
+database/
+├── migrations/           esquema     -> syrax migrate
+├── seeders/              datos demo  -> syrax db:seed
+└── factories/            objetos de mentira para tests
 
 src/
 ├── main.cpp              arranque y conexion a la BD
-├── routes.*              donde se arma la API
-├── controllers/          HTTP: recibe, delega, responde
-├── services/             logica de negocio
-├── repositories/         SQL. lo unico que sabe de la BD
-├── models/               la forma de la tabla
-├── requests/             lo que entra
-└── resources/            lo que sale
+├── routes/
+│   ├── routes.cpp        engancha las versiones
+│   └── v1.cpp            rutas de /api/v1
+├── controllers/User/     HTTP: recibe, delega, responde
+├── services/User/        logica de negocio
+├── repositories/User/    SQL. lo unico que sabe de la BD
+├── models/User/          la forma de la tabla
+├── requests/User/        lo que entra
+└── resources/User/       lo que sale
 ```
+
+Cada capa se subdivide por recurso (`controllers/User/`, `controllers/Order/`)
+para que con veinte entidades ninguna carpeta sea un basurero plano.
+
+## Versionar la API
+
+`src/routes/v1.cpp` monta todo bajo `/api/v1`. Para una v2: copia ese archivo,
+cambia `kPrefix`, y registralo en `routes.cpp`. Las dos versiones conviven y
+pueden apuntar a controladores distintos.
 
 **Por que models/ y resources/ estan separados:** `User` tiene `passwordHash`
 y `UserResource` no. Un campo privado no puede filtrarse por accidente porque
@@ -178,7 +238,7 @@ escribir ese mapeo ni generar modelos de 500 lineas.
 
 inline constexpr std::string_view kMain = R"T(#include <syrax/syrax.hpp>
 
-#include "routes.hpp"
+#include "routes/routes.hpp"
 
 #include <cstdint>
 #include <cstdlib>
@@ -207,18 +267,50 @@ inline constexpr std::string_view kRoutesH = R"T(#pragma once
 
 #include <syrax/syrax.hpp>
 
-// Punto unico donde se arma la API.
+// Punto unico donde se arma la API. Cada version vive en su propio archivo.
 void registerRoutes(syrax::App& app);
 )T";
 
-inline constexpr std::string_view kRoutesCpp = R"T(#include "routes.hpp"
+inline constexpr std::string_view kRoutesV1H = R"T(#pragma once
 
-#include "controllers/UserController.hpp"
+#include <syrax/syrax.hpp>
+
+#include <string_view>
+
+namespace routes::v1 {
+
+// Todas las rutas de esta version cuelgan de aqui. Para sacar una v2 se copia
+// este archivo, se cambia el prefijo, y las dos conviven.
+inline constexpr std::string_view kPrefix = "/api/v1";
+
+void register_(syrax::App& app);
+
+}  // namespace routes::v1
+)T";
+
+inline constexpr std::string_view kRoutesV1Cpp = R"T(#include "routes/v1.hpp"
+
+#include "controllers/User/UserController.hpp"
+
+namespace routes::v1 {
+
+void register_(syrax::App& app) {
+    controllers::user::routes(app, kPrefix);
+
+    // los controladores de esta version se registran aqui
+}
+
+}  // namespace routes::v1
+)T";
+
+inline constexpr std::string_view kRoutesCpp = R"T(#include "routes/routes.hpp"
+
+#include "routes/v1.hpp"
 
 void registerRoutes(syrax::App& app) {
-    controllers::UserController::routes(app);
+    routes::v1::register_(app);
 
-    // los controladores nuevos se registran aqui
+    // routes::v2::register_(app);
 }
 )T";
 
@@ -275,7 +367,7 @@ struct UpdateUser {
 
 inline constexpr std::string_view kResourceUserH = R"T(#pragma once
 
-#include "models/User.hpp"
+#include "models/User/User.hpp"
 
 #include <cstdint>
 #include <string>
@@ -302,7 +394,7 @@ std::vector<UserResource> from(const std::vector<models::User>& users);
 }  // namespace resources
 )T";
 
-inline constexpr std::string_view kResourceUserCpp = R"T(#include "resources/UserResource.hpp"
+inline constexpr std::string_view kResourceUserCpp = R"T(#include "resources/User/UserResource.hpp"
 
 namespace resources {
 
@@ -332,7 +424,7 @@ inline constexpr std::string_view kRepoUserH = R"T(#pragma once
 
 #include <syrax/syrax.hpp>
 
-#include "models/User.hpp"
+#include "models/User/User.hpp"
 
 #include <cstdint>
 #include <optional>
@@ -356,7 +448,7 @@ syrax::Task<bool>                        remove(std::int64_t id);
 }  // namespace repositories
 )T";
 
-inline constexpr std::string_view kRepoUserCpp = R"T(#include "repositories/UserRepository.hpp"
+inline constexpr std::string_view kRepoUserCpp = R"T(#include "repositories/User/UserRepository.hpp"
 
 namespace repositories::UserRepository {
 
@@ -412,8 +504,8 @@ inline constexpr std::string_view kServiceUserH = R"T(#pragma once
 
 #include <syrax/syrax.hpp>
 
-#include "models/User.hpp"
-#include "requests/UserRequests.hpp"
+#include "models/User/User.hpp"
+#include "requests/User/UserRequests.hpp"
 
 #include <cstdint>
 #include <optional>
@@ -436,9 +528,9 @@ syrax::Task<bool>                        remove(std::int64_t id);
 }  // namespace services
 )T";
 
-inline constexpr std::string_view kServiceUserCpp = R"T(#include "services/UserService.hpp"
+inline constexpr std::string_view kServiceUserCpp = R"T(#include "services/User/UserService.hpp"
 
-#include "repositories/UserRepository.hpp"
+#include "repositories/User/UserRepository.hpp"
 
 namespace services::UserService {
 
@@ -478,44 +570,50 @@ inline constexpr std::string_view kControllerUserH = R"T(#pragma once
 
 #include <syrax/syrax.hpp>
 
-namespace controllers::UserController {
+#include <string_view>
 
-void routes(syrax::App& app);
+namespace controllers::user {
 
-}  // namespace controllers::UserController
+// El prefijo lo decide la version de rutas que lo registra, no el controlador.
+void routes(syrax::App& app, std::string_view prefix);
+
+}  // namespace controllers::user
 )T";
 
-inline constexpr std::string_view kControllerUserCpp = R"T(#include "controllers/UserController.hpp"
+inline constexpr std::string_view kControllerUserCpp = R"T(#include "controllers/User/UserController.hpp"
 
-#include "requests/UserRequests.hpp"
-#include "resources/UserResource.hpp"
-#include "services/UserService.hpp"
+#include "requests/User/UserRequests.hpp"
+#include "resources/User/UserResource.hpp"
+#include "services/User/UserService.hpp"
 
 #include <cstdint>
+#include <string>
+#include <string_view>
 #include <vector>
 
 using namespace syrax;
 
-namespace controllers::UserController {
+namespace controllers::user {
 
 namespace service = services::UserService;
 
 // Los controladores son delgados a proposito: reciben, delegan, y traducen
 // el resultado a HTTP. Ninguna regla de negocio vive aqui.
-void routes(App& app) {
+void routes(App& app, std::string_view prefix) {
+    const std::string base{prefix};
 
-    app.get("/users", []() -> Task<Result<std::vector<resources::UserResource>>> {
+    app.get(base + "/users", []() -> Task<Result<std::vector<resources::UserResource>>> {
         co_return resources::from(co_await service::list());
     });
 
-    app.get("/users/{id}", [](std::int64_t id) -> Task<Result<resources::UserResource>> {
+    app.get(base + "/users/{id}", [](std::int64_t id) -> Task<Result<resources::UserResource>> {
         const auto user = co_await service::byId(id);
         if (!user) co_return NotFound("user not found");
 
         co_return resources::from(*user);
     });
 
-    app.post("/users", [](requests::CreateUser body)
+    app.post(base + "/users", [](requests::CreateUser body)
                  -> Task<Result<resources::UserResource>> {
         const auto user = co_await service::create(std::move(body));
         if (!user) co_return Conflict("email already registered");
@@ -523,7 +621,7 @@ void routes(App& app) {
         co_return resources::from(*user);
     });
 
-    app.put("/users/{id}", [](std::int64_t id, requests::UpdateUser body)
+    app.put(base + "/users/{id}", [](std::int64_t id, requests::UpdateUser body)
                  -> Task<Result<resources::UserResource>> {
         const auto user = co_await service::update(id, std::move(body));
         if (!user) co_return NotFound("user not found");
@@ -531,7 +629,7 @@ void routes(App& app) {
         co_return resources::from(*user);
     });
 
-    app.del("/users/{id}", [](std::int64_t id)
+    app.del(base + "/users/{id}", [](std::int64_t id)
                 -> Task<Result<resources::DeletedResource>> {
         if (!co_await service::remove(id)) co_return NotFound("user not found");
 
@@ -539,36 +637,44 @@ void routes(App& app) {
     });
 }
 
-}  // namespace controllers::UserController
+}  // namespace controllers::user
 )T";
 
 // ================================================================ indice
 
 inline constexpr File kProjectFiles[] = {
-    {"CMakeLists.txt",                      kCMake},
-    {".gitignore",                          kGitignore},
-    {"README.md",                           kReadme},
-    {"config/app.json",                     kAppConfig},
-    {".env.example",                        kEnvPostgres,       Engine::Postgres},
-    {".env.example",                        kEnvSqlite,         Engine::Sqlite},
-    {".env",                                kEnvPostgres,       Engine::Postgres},
-    {".env",                                kEnvSqlite,         Engine::Sqlite},
-    {"docker-compose.yml",                  kCompose,           Engine::Postgres},
-    {"migrations/001_create_users.sql",     kMigrationPostgres, Engine::Postgres},
-    {"migrations/001_create_users.sql",     kMigrationSqlite,   Engine::Sqlite},
-    {"src/main.cpp",                        kMain},
-    {"src/routes.hpp",                      kRoutesH},
-    {"src/routes.cpp",                      kRoutesCpp},
-    {"src/models/User.hpp",                 kModelUser},
-    {"src/requests/UserRequests.hpp",       kRequestsUser},
-    {"src/resources/UserResource.hpp",      kResourceUserH},
-    {"src/resources/UserResource.cpp",      kResourceUserCpp},
-    {"src/repositories/UserRepository.hpp", kRepoUserH},
-    {"src/repositories/UserRepository.cpp", kRepoUserCpp},
-    {"src/services/UserService.hpp",        kServiceUserH},
-    {"src/services/UserService.cpp",        kServiceUserCpp},
-    {"src/controllers/UserController.hpp",  kControllerUserH},
-    {"src/controllers/UserController.cpp",  kControllerUserCpp},
+    {"CMakeLists.txt",                           kCMake},
+    {".gitignore",                               kGitignore},
+    {"README.md",                                kReadme},
+    {"config/app.json",                          kAppConfig},
+    {".env.example",                             kEnvPostgres,       Engine::Postgres},
+    {".env.example",                             kEnvSqlite,         Engine::Sqlite},
+    {".env",                                     kEnvPostgres,       Engine::Postgres},
+    {".env",                                     kEnvSqlite,         Engine::Sqlite},
+    {"docker-compose.yml",                       kCompose,           Engine::Postgres},
+
+    {"database/migrations/001_create_users.sql", kMigrationPostgres, Engine::Postgres},
+    {"database/migrations/001_create_users.sql", kMigrationSqlite,   Engine::Sqlite},
+    {"database/seeders/001_users.sql",           kSeederPostgres,    Engine::Postgres},
+    {"database/seeders/001_users.sql",           kSeederSqlite,      Engine::Sqlite},
+    {"database/factories/UserFactory.hpp",       kUserFactory},
+
+    {"src/main.cpp",                             kMain},
+    {"src/routes/routes.hpp",                    kRoutesH},
+    {"src/routes/routes.cpp",                    kRoutesCpp},
+    {"src/routes/v1.hpp",                        kRoutesV1H},
+    {"src/routes/v1.cpp",                        kRoutesV1Cpp},
+
+    {"src/models/User/User.hpp",                 kModelUser},
+    {"src/requests/User/UserRequests.hpp",       kRequestsUser},
+    {"src/resources/User/UserResource.hpp",      kResourceUserH},
+    {"src/resources/User/UserResource.cpp",      kResourceUserCpp},
+    {"src/repositories/User/UserRepository.hpp", kRepoUserH},
+    {"src/repositories/User/UserRepository.cpp", kRepoUserCpp},
+    {"src/services/User/UserService.hpp",        kServiceUserH},
+    {"src/services/User/UserService.cpp",        kServiceUserCpp},
+    {"src/controllers/User/UserController.hpp",  kControllerUserH},
+    {"src/controllers/User/UserController.cpp",  kControllerUserCpp},
 };
 
 }  // namespace tpl

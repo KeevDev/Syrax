@@ -11,6 +11,8 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <algorithm>
+#include <map>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -36,10 +38,7 @@ std::string substitute(std::string_view tpl, std::string_view name,
     const bool pg = (engine == tpl::Engine::Postgres);
 
     const std::string setup =
-        pg ? "docker compose up -d\n"
-             "psql postgres://postgres:postgres@localhost/" + std::string{name} +
-                 " -f migrations/001_create_users.sql"
-           : "sqlite3 app.db < migrations/001_create_users.sql";
+        pg ? "docker compose up -d" : "# sqlite no necesita nada";
 
     const std::pair<std::string_view, std::string> subs[] = {
         {"@NAME@",   std::string{name}},
@@ -128,6 +127,81 @@ tpl::Engine promptEngine() {
                                              : tpl::Engine::Postgres;
 }
 
+// Lee el .env del proyecto. No es un parser completo de dotenv: KEY=VALUE,
+// una por linea, ignorando comentarios. Alcanza para saber a que base apuntar.
+std::map<std::string, std::string> readEnv() {
+    std::map<std::string, std::string> env;
+
+    std::ifstream f(".env");
+    if (!f) return env;
+
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.empty() || line[0] == '#') continue;
+
+        const auto eq = line.find('=');
+        if (eq == std::string::npos) continue;
+
+        env[line.substr(0, eq)] = line.substr(eq + 1);
+    }
+    return env;
+}
+
+// Ejecuta en orden los .sql de un directorio.
+//
+// Delega en los clientes de linea de comandos (sqlite3 / psql) en vez de
+// enlazar contra libpq: mantiene el CLI en 3 segundos de compilacion y sin
+// dependencias. Los .sql deben ser idempotentes (IF NOT EXISTS, ON CONFLICT):
+// esto corre todo cada vez, no lleva registro de lo aplicado.
+int runSqlDir(const std::string& dir, const std::string& label) {
+    if (!fs::is_directory(dir)) {
+        std::cerr << "error: no existe " << dir << "\n";
+        return 1;
+    }
+
+    const auto env    = readEnv();
+    const auto engine = env.count("DB_ENGINE") ? env.at("DB_ENGINE") : "postgres";
+
+    std::vector<fs::path> files;
+    for (const auto& entry : fs::directory_iterator(dir)) {
+        if (entry.path().extension() == ".sql") files.push_back(entry.path());
+    }
+    if (files.empty()) {
+        std::cout << "no hay archivos .sql en " << dir << "\n";
+        return 0;
+    }
+    std::ranges::sort(files);
+
+    const bool sqlite = (engine == "sqlite" || engine == "sqlite3");
+
+    std::string prefix;
+    if (sqlite) {
+        const auto file = env.count("DB_FILE") ? env.at("DB_FILE") : "app.db";
+        prefix          = "sqlite3 '" + file + "' < ";
+    } else {
+        const auto at = [&](const char* k, const char* d) {
+            return env.count(k) ? env.at(k) : std::string{d};
+        };
+        prefix = "psql 'postgres://" + at("DB_USER", "postgres") + ":" +
+                 at("DB_PASSWORD", "postgres") + "@" + at("DB_HOST", "127.0.0.1") + ":" +
+                 at("DB_PORT", "5432") + "/" + at("DB_NAME", "app") +
+                 "' -v ON_ERROR_STOP=1 -q -f ";
+    }
+
+    std::cout << label << " (" << (sqlite ? "sqlite" : "postgres") << ")\n";
+
+    for (const auto& file : files) {
+        std::cout << "  " << file.filename().string() << std::flush;
+
+        if (const int rc = run(prefix + "'" + file.string() + "'"); rc != 0) {
+            std::cout << "  FALLO\n";
+            return rc;
+        }
+        std::cout << "  ok\n";
+    }
+    return 0;
+}
+
 // ------------------------------------------------------------------- comandos
 
 int cmdNew(const std::string& name, tpl::Engine engine, bool engineGiven) {
@@ -170,7 +244,8 @@ int cmdNew(const std::string& name, tpl::Engine engine, bool engineGiven) {
     if (pg) {
         std::cout << "  docker compose up -d\n";
     }
-    std::cout << "  syrax serve\n";
+    std::cout << "  syrax migrate\n"
+              << "  syrax serve\n";
     return 0;
 }
 
@@ -220,6 +295,16 @@ int cmdUpgrade() {
                " " + tmp + " && cd " + tmp + " && ./install.sh && rm -rf " + tmp);
 }
 
+int cmdMigrate() {
+    if (!inProject()) return 1;
+    return runSqlDir("database/migrations", "aplicando migraciones");
+}
+
+int cmdSeed() {
+    if (!inProject()) return 1;
+    return runSqlDir("database/seeders", "cargando seeders");
+}
+
 int usage() {
     std::cout <<
         "syrax " SYRAX_VERSION "\n"
@@ -227,6 +312,8 @@ int usage() {
         "uso:\n"
         "  syrax new <nombre> [--db postgres|sqlite]   crea un proyecto\n"
         "  syrax build                                 configura y compila\n"
+        "  syrax migrate                               aplica database/migrations/*.sql\n"
+        "  syrax db:seed                               carga database/seeders/*.sql\n"
         "  syrax serve [--port N]                      compila y levanta (default 8080)\n"
         "  syrax upgrade                               recompila e instala la ultima version\n"
         "  syrax version                               muestra la version\n"
@@ -273,6 +360,8 @@ int main(int argc, char** argv) {
     }
 
     if (cmd == "build") return cmdBuild();
+    if (cmd == "migrate") return cmdMigrate();
+    if (cmd == "db:seed" || cmd == "seed") return cmdSeed();
 
     if (cmd == "serve") {
         std::string port = "8080";

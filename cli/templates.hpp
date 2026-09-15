@@ -633,7 +633,6 @@ namespace repositories {
 
 namespace UserRepository {
 syrax::Task<std::vector<models::User>>   all();
-syrax::Task<std::vector<models::User>>   adultos();
 syrax::Task<std::optional<models::User>> find(std::int64_t id);
 syrax::Task<bool>                        emailTaken(std::string email);
 syrax::Task<std::optional<models::User>> createIfEmailFree(std::string name,
@@ -651,7 +650,6 @@ namespace repositories::UserRepository {
 
 using syrax::db::execute;
 using syrax::db::findOne;
-using syrax::db::query;
 using syrax::db::returning;
 
 // Con el query builder: las columnas se verifican en compilacion, asi que
@@ -666,11 +664,6 @@ syrax::Task<std::optional<models::User>> find(std::int64_t id) {
 
 // Con SQL a mano: sigue disponible, y es lo que usarias para un JOIN o
 // cualquier cosa que el builder no cubre.
-syrax::Task<std::vector<models::User>> adultos() {
-    co_return co_await query<models::User>(
-        "SELECT id, name, email, age FROM users WHERE age >= @P1@ ORDER BY id", 18);
-}
-
 syrax::Task<bool> emailTaken(std::string email) {
     const auto found = co_await findOne<models::User>(
         "SELECT id, name, email, age FROM users WHERE email = @P1@", std::move(email));

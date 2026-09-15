@@ -488,7 +488,7 @@ int usage() {
         "uso:\n"
         "  new <nombre> [--db postgres|sqlite]   n    crea un proyecto\n"
         "  build                                 b    configura y compila\n"
-        "  serve [--port N]                      s    compila y levanta (default 8080)\n"
+        "  serve [--port N]                      s    compila y levanta (APP_PORT, o 8080)\n"
         "\n"
         "  migrate                               m    aplica las migraciones pendientes\n"
         "  migrate:rollback                      m:r  revierte la ultima\n"
@@ -555,7 +555,10 @@ int main(int argc, char** argv) {
     if (cmd == "help")             return usage();
 
     if (cmd == "serve") {
-        std::string port = "8080";
+        // Sin --port no se pasa argumento ninguno: el binario resuelve
+        // APP_PORT desde el .env. Pasarle un 8080 por defecto dejaba muerta
+        // esa variable, porque el argumento siempre le gana al archivo.
+        std::string port;
         for (std::size_t i = 1; i + 1 < args.size(); ++i) {
             if (args[i] == "--port" || args[i] == "-p") port = args[i + 1];
         }

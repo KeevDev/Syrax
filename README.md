@@ -197,7 +197,37 @@ co_return co_await db::transaction(
 
 `Tx` tiene las mismas cuatro operaciones que `db`. Si el cuerpo lanza, se deshace entera antes de propagar; `tx.rollback()` aborta sin lanzar, para cuando abortar es una decisión de negocio. Es lo que usa el repositorio que genera `syrax new`.
 
-> **Lo que Syrax no usa del ORM de Drogon es `Mapper<T>`**, y es a propósito: exige que el tipo declare `tableName`, `primaryKeyName`, `PrimaryKeyType`, `getColumnName`, `sqlForFindingByPrimaryKey` y `sqlForDeletingByPrimaryKey` — el modelo generado de ~500 líneas que este proyecto existe para evitar. El resto de `orm_lib` (pool, corrutinas, transacciones, prepared statements) sí se usa entero.
+#### Y si quieres `Mapper<T>`, puedes
+
+Syrax usa `orm_lib` de Drogon entero —pool, corrutinas, transacciones, prepared statements— salvo `Mapper<T>`. Pero **no te lo impide**: corre sobre el mismo `DbClient`, así que convive en el mismo proyecto y en la misma transacción.
+
+```bash
+drogon_ctl create model models     # necesita model.json y la base viva
+```
+
+```cpp
+#include <drogon/orm/CoroMapper.h>
+#include "models/Users.h"
+
+CoroMapper<drogon_model::api::Users> mapper(syrax::db::client());
+
+const auto total = co_await mapper.count();
+const auto page  = co_await mapper.orderBy(Users::Cols::_id).limit(3).findAll();
+const auto uno   = co_await mapper.findByPrimaryKey(1);
+```
+
+Lo bueno que te llevas: **nombres de columna tipados** (`Users::Cols::_id` con una errata no compila) y `Criteria` para filtros compuestos.
+
+Lo que cuesta, medido sobre una tabla `users` de 6 columnas generada con `drogon_ctl`:
+
+| | líneas |
+|---|---|
+| `models/Users.h` + `Users.cc` | **1.632**, generadas |
+| el `struct User` equivalente | **15**, escritas |
+
+Unas 270 líneas por columna. Además cada campo es `std::shared_ptr<T>` (`getValueOfId()` / `getId()`), hay tres setters por columna, y regenerar exige `drogon_ctl` con la base levantada en tiempo de build.
+
+Para cuatro columnas no compensa. Para un dominio grande con filtros dinámicos, empieza a pagar. La decisión es tuya, tabla por tabla.
 
 > **Un tipo que se refleja no puede vivir en un namespace anónimo.** Glaze saca los nombres de los campos a través de una variable `extern`, y un tipo sin enlace no puede nombrarse desde otra unidad de traducción. GCC lo deja pasar; **Clang lo rechaza** con `used but not defined in this translation unit`. Aplica a todo lo que Syrax serializa o mapea: bodies, resources y modelos. Ponlos en un namespace con nombre — que es donde el andamiaje los pone.
 

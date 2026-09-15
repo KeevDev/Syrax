@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <map>
+#include <chrono>
+#include <iostream>
 #include <optional>
 #include <vector>
 #include <string>
@@ -13,6 +15,11 @@ struct CreateUser {
     std::string name;
     std::string email;
     int         age;
+};
+
+struct Whoami {
+    std::string sub;
+    std::string role;
 };
 
 struct Health {
@@ -55,6 +62,17 @@ int main(int argc, char** argv) {
     const auto port = static_cast<std::uint16_t>(argc > 1 ? std::atoi(argv[1]) : 8080);
 
     App app;
+
+    // Seguridad de ejemplo: CORS, cabeceras, limite de peticiones, y una
+    // rama protegida por Bearer token.
+    app.cors()
+       .useOnResponse(securityHeaders())
+       .use(rateLimit(100, std::chrono::seconds{60}))
+       .use("/admin", auth::bearer("secreto-de-ejemplo"));
+
+    app.get("/admin/me", [](const Request& req) -> Result<Whoami> {
+        return Whoami{.sub = req.get("auth.sub"), .role = req.get("auth.role")};
+    });
 
     // Handler sin argumentos: el caso que rompia la deduccion del body.
     app.get("/users", []() -> Result<std::vector<User>> {

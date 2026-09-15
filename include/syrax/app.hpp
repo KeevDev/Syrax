@@ -3,6 +3,7 @@
 #include <drogon/drogon.h>
 #include <glaze/glaze.hpp>
 
+#include <syrax/middleware.hpp>
 #include <syrax/openapi.hpp>
 #include <syrax/result.hpp>
 #include <syrax/traits.hpp>
@@ -95,6 +96,32 @@ constexpr bool hasTrailingBody() {
     }
 }
 
+// Un handler puede pedir el Request como PRIMER argumento para leer
+// cabeceras o lo que haya dejado un middleware (el usuario autenticado, por
+// ejemplo). Es opcional: la mayoria de los handlers no lo necesita.
+template <typename Tuple>
+constexpr bool hasLeadingRequest() {
+    if constexpr (std::tuple_size_v<Tuple> == 0) {
+        return false;
+    } else {
+        return std::is_same_v<std::tuple_element_t<0, Tuple>, Request>;
+    }
+}
+
+template <typename Tuple, std::size_t... I>
+std::tuple<std::tuple_element_t<I + 1, Tuple>...> dropFirstHelper(std::index_sequence<I...>);
+
+// std::conditional_t instancia SUS DOS ramas, aunque solo use una. Con una
+// tupla vacia, `size - 1` desborda a SIZE_MAX y el programa no compila. Por
+// eso el tamano se acota aqui en vez de confiar en el cortocircuito.
+template <typename Tuple>
+inline constexpr std::size_t kDropFirstSize =
+    std::tuple_size_v<Tuple> > 0 ? std::tuple_size_v<Tuple> - 1 : 0;
+
+template <typename Tuple>
+using DropFirst = decltype(dropFirstHelper<Tuple>(
+    std::make_index_sequence<kDropFirstSize<Tuple>>{}));
+
 // Quita el ultimo elemento de una tupla de tipos. Sirve para separar
 // "los primeros N argumentos son path params, el ultimo es el body".
 template <typename Tuple, std::size_t... I>
@@ -123,12 +150,29 @@ std::optional<T> convertParam(const std::string& s) {
     }
 }
 
+// Drogon ya tiene renderizada la respuesta para cuando corren sus advices de
+// pre-sending, asi que addHeader() ahi no llega al cliente (se comprobo: el
+// advice dispara, la cabecera no sale). Por eso la cadena se aplica aqui, en
+// el momento en que Syrax construye la respuesta.
+//
+// Es estado global, que normalmente evitariamos; aqui es aceptable porque
+// drogon::app() ya es un singleton y solo hay una aplicacion por proceso.
+inline std::vector<ResponseMiddleware>& responseChain() {
+    static std::vector<ResponseMiddleware> chain;
+    return chain;
+}
+
+inline void applyResponseChain(const drogon::HttpResponsePtr& response) {
+    for (const auto& fn : responseChain()) fn(response);
+}
+
 inline drogon::HttpResponsePtr makeError(int status, std::string message) {
     Json::Value body;
     body["error"]["status"]  = status;
     body["error"]["message"] = std::move(message);
     auto resp = drogon::HttpResponse::newHttpJsonResponse(body);
     resp->setStatusCode(static_cast<drogon::HttpStatusCode>(status));
+    applyResponseChain(resp);
     return resp;
 }
 
@@ -142,6 +186,7 @@ drogon::HttpResponsePtr makeOk(const T& value, int status) {
     resp->setStatusCode(static_cast<drogon::HttpStatusCode>(status));
     resp->setContentTypeCode(drogon::CT_APPLICATION_JSON);
     resp->setBody(std::move(out));
+    applyResponseChain(resp);
     return resp;
 }
 
@@ -176,6 +221,29 @@ public:
         return route<false>(path, std::forward<F>(f), drogon::Delete, 200);
     }
 
+    // Middleware global: corre antes de cada handler, en orden de registro.
+    App& use(Middleware middleware) {
+        middlewares_.push_back({.prefix = {}, .fn = std::move(middleware)});
+        return *this;
+    }
+
+    // Middleware para las rutas que empiezan con un prefijo.
+    App& use(std::string prefix, Middleware middleware) {
+        middlewares_.push_back({.prefix = std::move(prefix), .fn = std::move(middleware)});
+        return *this;
+    }
+
+    // Modifica cada respuesta ya construida (cabeceras de seguridad, CORS).
+    App& useOnResponse(ResponseMiddleware middleware) {
+        responseMiddlewares_.push_back(std::move(middleware));
+        return *this;
+    }
+
+    App& cors(CorsOptions options = {}) {
+        cors_ = std::move(options);
+        return *this;
+    }
+
     // Titulo y version que aparecen en /docs.
     App& docs(std::string title, std::string version = "1.0.0") {
         title_   = std::move(title);
@@ -190,6 +258,9 @@ public:
     }
 
     void run(std::uint16_t port = 8080) {
+        // El orden importa: la cadena de respuesta tiene que estar poblada
+        // antes de construir el 404 estatico y las rutas de documentacion.
+        registerMiddlewares();
         if (docsEnabled_) registerDocs();
 
         // Drogon sirve una pagina HTML para rutas no encontradas. Una API debe
@@ -222,6 +293,75 @@ private:
         });
     }
 
+    struct Scoped {
+        std::string prefix;
+        Middleware  fn;
+    };
+
+    void registerMiddlewares() {
+        if (cors_) registerCors();
+
+        if (!middlewares_.empty()) {
+            drogon::app().registerPreHandlingAdvice(
+                [chain = middlewares_](const drogon::HttpRequestPtr& req,
+                                       drogon::AdviceCallback&&      respond,
+                                       drogon::AdviceChainCallback&& next) {
+                    Request request{req};
+                    const auto path = request.path();
+
+                    for (const auto& entry : chain) {
+                        if (!entry.prefix.empty() && !path.starts_with(entry.prefix)) continue;
+
+                        if (const auto error = entry.fn(request)) {
+                            respond(detail::makeError(error->status, error->message));
+                            return;
+                        }
+                    }
+                    next();
+                });
+        }
+
+        detail::responseChain() = responseMiddlewares_;
+    }
+
+    void registerCors() {
+        const auto& options = *cors_;
+
+        const auto origin      = detail::join(options.origins, ", ");
+        const auto methods     = detail::join(options.methods, ", ");
+        const auto headers     = detail::join(options.headers, ", ");
+        const auto credentials = options.credentials;
+        const auto maxAge      = std::to_string(options.maxAge);
+
+        // El preflight se responde antes de llegar al ruteo: OPTIONS no
+        // corresponde a ningun handler y terminaria en 404.
+        drogon::app().registerPreRoutingAdvice(
+            [origin, methods, headers, credentials, maxAge](
+                const drogon::HttpRequestPtr& req, drogon::AdviceCallback&& respond,
+                drogon::AdviceChainCallback&& next) {
+                if (req->method() != drogon::Options) {
+                    next();
+                    return;
+                }
+
+                auto resp = drogon::HttpResponse::newHttpResponse();
+                resp->setStatusCode(drogon::k204NoContent);
+                resp->addHeader("Access-Control-Allow-Origin", origin);
+                resp->addHeader("Access-Control-Allow-Methods", methods);
+                resp->addHeader("Access-Control-Allow-Headers", headers);
+                resp->addHeader("Access-Control-Max-Age", maxAge);
+                if (credentials) resp->addHeader("Access-Control-Allow-Credentials", "true");
+                detail::applyResponseChain(resp);
+
+                respond(resp);
+            });
+
+        useOnResponse([origin, credentials](const drogon::HttpResponsePtr& resp) {
+            resp->addHeader("Access-Control-Allow-Origin", origin);
+            if (credentials) resp->addHeader("Access-Control-Allow-Credentials", "true");
+        });
+    }
+
     void registerDocs() {
         const auto spec = buildOpenApi(routes_, title_, version_);
         const auto html = swaggerHtml(title_);
@@ -232,6 +372,7 @@ private:
                 auto resp = drogon::HttpResponse::newHttpResponse();
                 resp->setContentTypeCode(drogon::CT_APPLICATION_JSON);
                 resp->setBody(spec);
+                detail::applyResponseChain(resp);
                 cb(resp);
             },
             {drogon::Get});
@@ -242,19 +383,29 @@ private:
                 auto resp = drogon::HttpResponse::newHttpResponse();
                 resp->setContentTypeCode(drogon::CT_TEXT_HTML);
                 resp->setBody(html);
+                detail::applyResponseChain(resp);
                 cb(resp);
             },
             {drogon::Get});
     }
 
-    std::vector<RouteInfo> routes_;
+    std::vector<Scoped>             middlewares_;
+    std::vector<ResponseMiddleware>  responseMiddlewares_;
+    std::optional<CorsOptions>       cors_;
+    std::vector<RouteInfo>           routes_;
     std::string            title_       = "API";
     std::string            version_     = "1.0.0";
     bool                   docsEnabled_ = true;
 
     template <bool AllowBody, typename F>
     App& route(const std::string& path, F&& f, drogon::HttpMethod method, int okStatus) {
-        using Args                 = typename detail::fn_traits<std::decay_t<F>>::args;
+        using Raw = typename detail::fn_traits<std::decay_t<F>>::args;
+
+        // Se descarta el Request inicial, si lo hay, antes de repartir el
+        // resto entre path params y body.
+        constexpr bool kWantsRequest = detail::hasLeadingRequest<Raw>();
+        using Args = std::conditional_t<kWantsRequest, detail::DropFirst<Raw>, Raw>;
+
         constexpr std::size_t kArity = std::tuple_size_v<Args>;
 
         // Un handler puede pedir path params y body a la vez:
@@ -267,19 +418,20 @@ private:
 
             note(method, path, detail::schemaOf<Body>(), detail::schemaOf<Value>(), okStatus);
 
-            registerWithBody<Body>(path, std::forward<F>(f), method, okStatus,
-                                   static_cast<detail::DropLast<Args>*>(nullptr));
+            registerWithBody<Body, kWantsRequest>(
+                path, std::forward<F>(f), method, okStatus,
+                static_cast<detail::DropLast<Args>*>(nullptr));
         } else {
             note(method, path, {}, detail::schemaOf<Value>(), okStatus);
 
-            registerParams(path, std::forward<F>(f), method, okStatus,
-                           static_cast<Args*>(nullptr));
+            registerParams<kWantsRequest>(path, std::forward<F>(f), method, okStatus,
+                                          static_cast<Args*>(nullptr));
         }
         return *this;
     }
 
     // Cero o mas path params seguidos de un body JSON.
-    template <typename Body, typename F, typename... Params>
+    template <typename Body, bool WantsRequest, typename F, typename... Params>
     void registerWithBody(const std::string& path, F f, drogon::HttpMethod method,
                           int okStatus, std::tuple<Params...>*) {
         using Ret = typename detail::fn_traits<F>::result;
@@ -305,8 +457,15 @@ private:
                         co_return;
                     }
 
-                    auto result = co_await std::apply(
-                        [&f, &body](const auto&... o) { return f(*o..., std::move(body)); },
+                    Request request{req};
+                    auto    result = co_await std::apply(
+                        [&](const auto&... o) {
+                            if constexpr (WantsRequest) {
+                                return f(request, *o..., std::move(body));
+                            } else {
+                                return f(*o..., std::move(body));
+                            }
+                        },
                         params);
                     detail::respond(cb, result, okStatus);
                     co_return;
@@ -332,10 +491,15 @@ private:
                         return;
                     }
 
+                    Request request{req};
                     detail::respond(cb,
                                     std::apply(
-                                        [&f, &body](const auto&... o) {
-                                            return f(*o..., std::move(body));
+                                        [&](const auto&... o) {
+                                            if constexpr (WantsRequest) {
+                                                return f(request, *o..., std::move(body));
+                                            } else {
+                                                return f(*o..., std::move(body));
+                                            }
                                         },
                                         params),
                                     okStatus);
@@ -345,7 +509,7 @@ private:
     }
 
     // Solo path params, sin body.
-    template <typename F, typename... Args>
+    template <bool WantsRequest, typename F, typename... Args>
     void registerParams(const std::string& path, F f, drogon::HttpMethod method,
                         int okStatus, std::tuple<Args...>*) {
         using Ret = typename detail::fn_traits<F>::result;
@@ -366,8 +530,13 @@ private:
                         co_return;
                     }
 
-                    auto result = co_await std::apply(
-                        [&f](const auto&... o) { return f(*o...); }, conv);
+                    Request request{req};
+                    auto    result = co_await std::apply(
+                        [&](const auto&... o) {
+                            if constexpr (WantsRequest) return f(request, *o...);
+                            else return f(*o...);
+                        },
+                        conv);
                     detail::respond(cb, result, okStatus);
                     co_return;
                 },
@@ -385,9 +554,15 @@ private:
                         return;
                     }
 
-                    detail::respond(
-                        cb, std::apply([&f](const auto&... o) { return f(*o...); }, conv),
-                        okStatus);
+                    Request request{req};
+                    detail::respond(cb,
+                                    std::apply(
+                                        [&](const auto&... o) {
+                                            if constexpr (WantsRequest) return f(request, *o...);
+                                            else return f(*o...);
+                                        },
+                                        conv),
+                                    okStatus);
                 },
                 {method});
         }

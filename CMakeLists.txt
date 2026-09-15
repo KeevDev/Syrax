@@ -54,7 +54,8 @@ target_include_directories(syrax INTERFACE
     $<INSTALL_INTERFACE:include>
 )
 target_compile_features(syrax INTERFACE cxx_std_23)
-target_link_libraries(syrax INTERFACE drogon glaze::glaze)
+find_package(OpenSSL REQUIRED)
+target_link_libraries(syrax INTERFACE drogon glaze::glaze OpenSSL::Crypto)
 
 install(DIRECTORY include/ DESTINATION include)
 endif()  # SYRAX_BUILD_LIB

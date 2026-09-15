@@ -11,6 +11,9 @@ add_executable(syrax_tests
     openapi_test.cpp
     db_test.cpp
     http_test.cpp
+    auth_test.cpp
+    policy_test.cpp
+    middleware_test.cpp
 )
 target_link_libraries(syrax_tests PRIVATE syrax::syrax Catch2::Catch2WithMain)
 

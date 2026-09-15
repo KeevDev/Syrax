@@ -177,6 +177,12 @@ El mapeo columna → campo lo resuelve Glaze en tiempo de compilación por nombr
 
 Conservas de Drogon el pool de conexiones, las corrutinas y los prepared statements. Lo que no hay es query builder ni relaciones: el SQL está a la vista.
 
+Para un valor suelto no hace falta declarar un struct:
+
+```cpp
+const auto total = co_await db::scalar<std::int64_t>("SELECT count(*) FROM users");
+```
+
 **Transacciones.** Un "comprobar y luego insertar" en dos consultas sueltas es una condición de carrera — dos peticiones ven el hueco libre las dos:
 
 ```cpp
@@ -414,7 +420,7 @@ syrax test                     # en el repo de Syrax
 ctest --test-dir build         # equivalente
 ```
 
-110 casos cubriendo el generador de DDL en ambos dialectos, `ALTER TABLE` ejecutado contra SQLite real, el mapeo de filas a structs, las reglas de validación y su anotación del JSON Schema, la generación de OpenAPI, JWT y hashing de contraseñas, middlewares y políticas, la integración HTTP completa (ruteo, binding de body, 422 con detalle por campo, path params, corrutinas, el 404 y el 500 en JSON) y los WebSockets hablando el protocolo a mano contra el servidor real.
+112 casos cubriendo el generador de DDL en ambos dialectos, `ALTER TABLE` ejecutado contra SQLite real, el mapeo de filas a structs, las reglas de validación y su anotación del JSON Schema, la generación de OpenAPI, JWT y hashing de contraseñas, middlewares y políticas, la integración HTTP completa (ruteo, binding de body, 422 con detalle por campo, path params, corrutinas, el 404 y el 500 en JSON) y los WebSockets hablando el protocolo a mano contra el servidor real.
 
 CI en GitHub Actions, en cada push y PR:
 

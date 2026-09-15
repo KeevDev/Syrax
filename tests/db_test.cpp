@@ -241,3 +241,29 @@ TEST_CASE("dentro de la transaccion se lee lo que ella misma escribio", "[db][tx
     REQUIRE(found.has_value());
     CHECK(found->name == "grace");
 }
+
+TEST_CASE("scalar devuelve un valor suelto sin declarar un struct", "[db]") {
+    TempDb db;
+    db->execSqlSync("CREATE TABLE people (id INTEGER, name TEXT, age INTEGER)");
+    db->execSqlSync("INSERT INTO people VALUES (1, 'ada', 36), (2, 'alan', 41)");
+
+    const auto total = drogon::sync_wait(syrax::db::transactionOn(
+        db.get(), [](const syrax::db::Tx& tx) -> drogon::Task<std::int64_t> {
+            co_return co_await tx.scalar<std::int64_t>("SELECT count(*) FROM people");
+        }));
+
+    CHECK(total == 2);
+}
+
+TEST_CASE("scalar sobre una tabla vacia da el valor por defecto", "[db]") {
+    TempDb db;
+    db->execSqlSync("CREATE TABLE people (id INTEGER, name TEXT, age INTEGER)");
+
+    // max() de cero filas es NULL, no un error: devuelve 0 en vez de reventar.
+    const auto maximo = drogon::sync_wait(syrax::db::transactionOn(
+        db.get(), [](const syrax::db::Tx& tx) -> drogon::Task<std::int64_t> {
+            co_return co_await tx.scalar<std::int64_t>("SELECT max(age) FROM people");
+        }));
+
+    CHECK(maximo == 0);
+}

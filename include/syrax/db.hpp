@@ -199,6 +199,22 @@ drogon::Task<T> returning(std::string sql, Args... args) {
     co_return co_await detail::returningOn<T>(client(), std::move(sql), std::move(args)...);
 }
 
+// Un unico valor: count(*), max(x), exists(...). Sin esto hay que declarar un
+// struct de un campo para cada agregado, y encima no puede ir dentro de la
+// funcion porque Glaze no refleja tipos locales.
+//
+//   const auto total = co_await db::scalar<std::int64_t>("SELECT count(*) FROM users");
+template <typename T, typename... Args>
+drogon::Task<T> scalar(std::string sql, Args... args) {
+    const auto result = co_await client()->execSqlCoro(sql, std::move(args)...);
+    if (result.empty() || result.front().size() == 0) co_return T{};
+
+    const auto field = result.front()[0];
+    if (field.isNull()) co_return T{};
+
+    co_return field.template as<T>();
+}
+
 // ------------------------------------------------------------ transaccion
 
 // Las mismas cuatro operaciones, pero dentro de una transaccion.
@@ -231,6 +247,17 @@ public:
     drogon::Task<T> returning(std::string sql, Args... args) const {
         co_return co_await detail::returningOn<T>(transaction_, std::move(sql),
                                                   std::move(args)...);
+    }
+
+    template <typename T, typename... Args>
+    drogon::Task<T> scalar(std::string sql, Args... args) const {
+        const auto result = co_await transaction_->execSqlCoro(sql, std::move(args)...);
+        if (result.empty() || result.front().size() == 0) co_return T{};
+
+        const auto field = result.front()[0];
+        if (field.isNull()) co_return T{};
+
+        co_return field.template as<T>();
     }
 
     // Deshace lo hecho hasta aqui sin lanzar. Util cuando abortar es una

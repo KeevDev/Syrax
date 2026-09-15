@@ -76,7 +76,10 @@ logs/*
 !logs/.gitkeep
 )T";
 
-inline constexpr std::string_view kEnvPostgres = R"T(DB_ENGINE=postgres
+inline constexpr std::string_view kEnvPostgres = R"T(# Puerto donde escucha la app. Un argumento en la linea de comandos lo pisa.
+APP_PORT=8080
+
+DB_ENGINE=postgres
 DB_HOST=127.0.0.1
 
 # Lo usan la app Y el docker-compose. Si el puerto esta ocupado por otro
@@ -87,7 +90,10 @@ DB_USER=postgres
 DB_PASSWORD=postgres
 )T";
 
-inline constexpr std::string_view kEnvSqlite = R"T(DB_ENGINE=sqlite
+inline constexpr std::string_view kEnvSqlite = R"T(# Puerto donde escucha la app. Un argumento en la linea de comandos lo pisa.
+APP_PORT=8080
+
+DB_ENGINE=sqlite
 DB_FILE=app.db
 )T";
 
@@ -155,11 +161,6 @@ inline constexpr std::string_view kBootstrapH = R"T(#pragma once
 
 namespace bootstrap {
 
-// Todo lo que hay que preparar antes de atender la primera peticion:
-// configuracion, base de datos, documentacion y rutas.
-//
-// Vive aparte de main.cpp porque esto crece (middleware, plugins, manejadores
-// de error) y main deberia seguir cabiendo en una pantalla.
 syrax::App create();
 
 }  // namespace bootstrap
@@ -174,17 +175,14 @@ inline constexpr std::string_view kBootstrapCpp = R"T(#include "bootstrap/app.hp
 namespace bootstrap {
 
 syrax::App create() {
-    // Ajustes del servidor: hilos, logging, limites. Se versiona.
     if (std::filesystem::exists("config/app.json")) {
         drogon::app().loadConfigFile("config/app.json");
     }
 
-    // Credenciales desde .env y el entorno. NO se versiona.
     syrax::db::configureFromEnv();
 
     syrax::App app;
 
-    // Titulo y version que se ven en /docs.
     app.docs("@NAME@", "1.0.0");
 
     registerRoutes(app);
@@ -254,9 +252,6 @@ inline constexpr std::string_view kMigrationUsers = R"T(#pragma once
 
 #include <string>
 
-// Una migracion es una clase con up() y down(). El schema builder genera el
-// DDL correcto para postgres o sqlite, asi que esto no cambia si migras de
-// motor.
 struct CreateUsersTable : syrax::Migration {
     std::string name() const override { return "001_create_users"; }
 
@@ -280,7 +275,6 @@ inline constexpr std::string_view kMigrationsH = R"T(#pragma once
 
 #include <syrax/syrax.hpp>
 
-// Registra todas las migraciones del proyecto, en orden de aplicacion.
 void registerMigrations(syrax::Migrator& migrator);
 )T";
 
@@ -288,12 +282,6 @@ inline constexpr std::string_view kMigrationsCpp = R"T(#include "migrations.hpp"
 
 #include "migrations/001_create_users.hpp"
 
-// El orden de esta lista es el orden en que se aplican. Agregar una migracion
-// son dos pasos: crear el archivo y anadir una linea aqui.
-//
-// El registro es explicito a proposito: nada de macros ni de auto-registro por
-// inicializacion estatica, cuyo orden no esta garantizado entre unidades de
-// traduccion.
 void registerMigrations(syrax::Migrator& migrator) {
     migrator.add<CreateUsersTable>();
 }
@@ -323,11 +311,6 @@ inline constexpr std::string_view kUserFactory = R"T(#pragma once
 
 namespace factories {
 
-// Construye usuarios de mentira para pruebas y datos de desarrollo.
-//
-// Nota honesta: esto todavia no lo usa nadie. Cobra sentido cuando el proyecto
-// tenga tests; hoy los datos de ejemplo se cargan con `syrax db:seed`, que
-// corre database/seeders/*.sql.
 struct UserFactory {
     static models::User make(std::int64_t id = 1) {
         return models::User{
@@ -453,8 +436,8 @@ int main(int argc, char** argv) {
         return migrations(arg);
     }
 
-    // Sin subcomando, el argumento es el puerto.
-    const auto port = static_cast<std::uint16_t>(arg.empty() ? 8080 : std::atoi(arg.c_str()));
+    const auto port = arg.empty() ? syrax::envPort()
+                                  : static_cast<std::uint16_t>(std::atoi(arg.c_str()));
 
     auto app = bootstrap::create();
     app.run(port);
@@ -466,7 +449,6 @@ inline constexpr std::string_view kRoutesH = R"T(#pragma once
 
 #include <syrax/syrax.hpp>
 
-// Punto unico donde se arma la API. Cada version vive en su propio archivo.
 void registerRoutes(syrax::App& app);
 )T";
 
@@ -478,8 +460,6 @@ inline constexpr std::string_view kRoutesV1H = R"T(#pragma once
 
 namespace routes::v1 {
 
-// Todas las rutas de esta version cuelgan de aqui. Para sacar una v2 se copia
-// este archivo, se cambia el prefijo, y las dos conviven.
 inline constexpr std::string_view kPrefix = "/api/v1";
 
 void register_(syrax::App& app);
@@ -496,7 +476,6 @@ namespace routes::v1 {
 void register_(syrax::App& app) {
     controllers::user::routes(app, kPrefix);
 
-    // los controladores de esta version se registran aqui
 }
 
 }  // namespace routes::v1
@@ -517,16 +496,12 @@ struct Status {
 }  // namespace health
 
 void registerRoutes(syrax::App& app) {
-    // Fuera del versionado y sin tocar la base: lo que responde esto es
-    // "el proceso esta vivo y sirviendo". Si consultara la base, una caida
-    // de la base tumbaria el contenedor entero en vez de degradarlo.
     app.get("/health", []() -> syrax::Result<health::Status> {
         return health::Status{.status = "ok"};
     });
 
     routes::v1::register_(app);
 
-    // routes::v2::register_(app);
 }
 )T";
 
@@ -539,11 +514,6 @@ inline constexpr std::string_view kModelUser = R"T(#pragma once
 
 namespace models {
 
-// La forma de la tabla `users`. Un struct plano, no una clase de ORM:
-// Syrax mapea las columnas a los campos por nombre, en tiempo de compilacion.
-//
-// passwordHash vive aqui pero no en UserResource, asi que no puede salir en
-// una respuesta por accidente.
 struct User {
     std::int64_t id;
     std::string  name;
@@ -564,13 +534,6 @@ inline constexpr std::string_view kRequestsUser = R"T(#pragma once
 
 namespace requests {
 
-// Lo que entra por el body. Syrax lo parsea y valida antes de que el
-// controlador se ejecute: si falta un campo, el tipo no cuadra o alguna regla
-// no se cumple, el cliente recibe un 422 y el handler nunca corre.
-//
-// rules() es opcional. Sin el, la validacion es solo estructural: que el JSON
-// tenga los campos declarados y con el tipo correcto. Con el, ademas se
-// comprueba el contenido, y los limites aparecen solos en /docs.
 struct CreateUser {
     std::string name;
     std::string email;
@@ -608,8 +571,6 @@ inline constexpr std::string_view kResourceUserH = R"T(#pragma once
 
 namespace resources {
 
-// Lo que sale. Separado del modelo a proposito: es el contrato publico de la
-// API y cambia por razones distintas al esquema de la base de datos.
 struct UserResource {
     std::int64_t id;
     std::string  name;
@@ -666,14 +627,12 @@ inline constexpr std::string_view kRepoUserH = R"T(#pragma once
 
 namespace repositories {
 
-// SQL y nada mas. Si cambias de motor o de esquema, este es el unico archivo
-// que se toca.
 namespace UserRepository {
-
 syrax::Task<std::vector<models::User>>   all();
 syrax::Task<std::optional<models::User>> find(std::int64_t id);
 syrax::Task<bool>                        emailTaken(std::string email);
-syrax::Task<models::User>                create(std::string name, std::string email, int age);
+syrax::Task<std::optional<models::User>> createIfEmailFree(std::string name,
+                                                           std::string email, int age);
 syrax::Task<std::optional<models::User>> update(std::int64_t id, std::string name, std::string email);
 syrax::Task<bool>                        remove(std::int64_t id);
 
@@ -706,11 +665,25 @@ syrax::Task<bool> emailTaken(std::string email) {
     co_return found.has_value();
 }
 
-syrax::Task<models::User> create(std::string name, std::string email, int age) {
-    co_return co_await returning<models::User>(
-        "INSERT INTO users (name, email, age) VALUES (@P1@, @P2@, @P3@) "
-        "RETURNING id, name, email, age",
-        std::move(name), std::move(email), age);
+// Comprobar y luego insertar en dos consultas sueltas es una condicion de
+// carrera: dos peticiones simultaneas ven el email libre las dos. Dentro de
+// una transaccion, y con el UNIQUE de la tabla detras, una gana y la otra
+// recibe nullopt.
+syrax::Task<std::optional<models::User>> createIfEmailFree(std::string name,
+                                                           std::string email, int age) {
+    co_return co_await syrax::db::transaction(
+        [name = std::move(name), email = std::move(email), age](const syrax::db::Tx& tx)
+            -> syrax::Task<std::optional<models::User>> {
+            const auto taken = co_await tx.findOne<models::User>(
+                "SELECT id, name, email, age FROM users WHERE email = @P1@", email);
+
+            if (taken) co_return std::nullopt;
+
+            co_return co_await tx.returning<models::User>(
+                "INSERT INTO users (name, email, age) VALUES (@P1@, @P2@, @P3@) "
+                "RETURNING id, name, email, age",
+                name, email, age);
+        });
 }
 
 syrax::Task<std::optional<models::User>> update(std::int64_t id, std::string name,
@@ -746,13 +719,10 @@ inline constexpr std::string_view kServiceUserH = R"T(#pragma once
 
 namespace services {
 
-// Las reglas de negocio. El controlador no decide nada; pregunta aqui.
 namespace UserService {
-
 syrax::Task<std::vector<models::User>>   list();
 syrax::Task<std::optional<models::User>> byId(std::int64_t id);
 
-// Devuelve nullopt si el email ya existe.
 syrax::Task<std::optional<models::User>> create(requests::CreateUser input);
 syrax::Task<std::optional<models::User>> update(std::int64_t id, requests::UpdateUser input);
 syrax::Task<bool>                        remove(std::int64_t id);
@@ -778,11 +748,8 @@ syrax::Task<std::optional<models::User>> byId(std::int64_t id) {
 }
 
 syrax::Task<std::optional<models::User>> create(requests::CreateUser input) {
-    // La regla de negocio vive aqui, no en el controlador ni en el SQL.
-    if (co_await repo::emailTaken(input.email)) co_return std::nullopt;
-
-    co_return co_await repo::create(std::move(input.name), std::move(input.email),
-                                    input.age);
+    co_return co_await repo::createIfEmailFree(std::move(input.name),
+                                               std::move(input.email), input.age);
 }
 
 syrax::Task<std::optional<models::User>> update(std::int64_t id,
@@ -807,7 +774,6 @@ inline constexpr std::string_view kControllerUserH = R"T(#pragma once
 
 namespace controllers::user {
 
-// El prefijo lo decide la version de rutas que lo registra, no el controlador.
 void routes(syrax::App& app, std::string_view prefix);
 
 }  // namespace controllers::user
@@ -830,8 +796,6 @@ namespace controllers::user {
 
 namespace service = services::UserService;
 
-// Los controladores son delgados a proposito: reciben, delegan, y traducen
-// el resultado a HTTP. Ninguna regla de negocio vive aqui.
 void routes(App& app, std::string_view prefix) {
     const std::string base{prefix};
 

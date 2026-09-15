@@ -175,7 +175,23 @@ auto nuevo = co_await db::returning<User>("INSERT ... RETURNING id, name, email,
 
 El mapeo columna → campo lo resuelve Glaze en tiempo de compilación por nombre. **No hay que escribirlo ni generar modelos de 500 líneas.** Una columna `NULL` deja el campo en su valor por defecto; usa `std::optional` si necesitas distinguir.
 
-Conservas de Drogon el pool de conexiones, las corrutinas, las transacciones y los prepared statements. Lo que no hay es query builder ni relaciones: el SQL está a la vista.
+Conservas de Drogon el pool de conexiones, las corrutinas y los prepared statements. Lo que no hay es query builder ni relaciones: el SQL está a la vista.
+
+**Transacciones.** Un "comprobar y luego insertar" en dos consultas sueltas es una condición de carrera — dos peticiones ven el hueco libre las dos:
+
+```cpp
+co_return co_await db::transaction(
+    [=](const db::Tx& tx) -> Task<std::optional<User>> {
+        const auto taken = co_await tx.findOne<User>("SELECT ... WHERE email = $1", email);
+        if (taken) co_return std::nullopt;
+
+        co_return co_await tx.returning<User>("INSERT ... RETURNING ...", name, email, age);
+    });
+```
+
+`Tx` tiene las mismas cuatro operaciones que `db`. Si el cuerpo lanza, se deshace entera antes de propagar; `tx.rollback()` aborta sin lanzar, para cuando abortar es una decisión de negocio. Es lo que usa el repositorio que genera `syrax new`.
+
+> **Lo que Syrax no usa del ORM de Drogon es `Mapper<T>`**, y es a propósito: exige que el tipo declare `tableName`, `primaryKeyName`, `PrimaryKeyType`, `getColumnName`, `sqlForFindingByPrimaryKey` y `sqlForDeletingByPrimaryKey` — el modelo generado de ~500 líneas que este proyecto existe para evitar. El resto de `orm_lib` (pool, corrutinas, transacciones, prepared statements) sí se usa entero.
 
 > **Un tipo que se refleja no puede vivir en un namespace anónimo.** Glaze saca los nombres de los campos a través de una variable `extern`, y un tipo sin enlace no puede nombrarse desde otra unidad de traducción. GCC lo deja pasar; **Clang lo rechaza** con `used but not defined in this translation unit`. Aplica a todo lo que Syrax serializa o mapea: bodies, resources y modelos. Ponlos en un namespace con nombre — que es donde el andamiaje los pone.
 
@@ -243,6 +259,18 @@ schema.table("users", [](Blueprint& t) {
 app.docs("Mi API", "2.0.0");   // titulo y version
 app.withoutDocs();             // apagarlo en produccion
 ```
+
+### Puerto y configuración
+
+El puerto se resuelve igual que las credenciales, de más a menos prioridad:
+
+```bash
+./mi-api 3000        # 1. argumento explícito
+APP_PORT=3000        # 2. entorno, o el .env
+                     # 3. 8080
+```
+
+`syrax::envPort()` hace esa resolución. Un `APP_PORT` inválido no se ignora en silencio: avisa por `stderr` y cae al default, porque quien escribió `APP_PORT=ocho` quiso decir algo.
 
 ### Middleware, autenticación y políticas
 
@@ -386,7 +414,7 @@ syrax test                     # en el repo de Syrax
 ctest --test-dir build         # equivalente
 ```
 
-102 casos cubriendo el generador de DDL en ambos dialectos, `ALTER TABLE` ejecutado contra SQLite real, el mapeo de filas a structs, las reglas de validación y su anotación del JSON Schema, la generación de OpenAPI, JWT y hashing de contraseñas, middlewares y políticas, la integración HTTP completa (ruteo, binding de body, 422 con detalle por campo, path params, corrutinas, el 404 y el 500 en JSON) y los WebSockets hablando el protocolo a mano contra el servidor real.
+110 casos cubriendo el generador de DDL en ambos dialectos, `ALTER TABLE` ejecutado contra SQLite real, el mapeo de filas a structs, las reglas de validación y su anotación del JSON Schema, la generación de OpenAPI, JWT y hashing de contraseñas, middlewares y políticas, la integración HTTP completa (ruteo, binding de body, 422 con detalle por campo, path params, corrutinas, el 404 y el 500 en JSON) y los WebSockets hablando el protocolo a mano contra el servidor real.
 
 CI en GitHub Actions, en cada push y PR:
 

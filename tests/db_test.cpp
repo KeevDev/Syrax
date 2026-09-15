@@ -1,8 +1,12 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <drogon/orm/DbClient.h>
+#include <drogon/utils/coroutine.h>
+
 #include <syrax/db.hpp>
 #include <syrax/migration.hpp>
+
+#include <stdexcept>
 
 #include <unistd.h>
 
@@ -173,4 +177,67 @@ TEST_CASE("el SQL de ALTER se ejecuta de verdad en sqlite", "[db][alter]") {
     for (const auto& sql : drop.statements()) db->execSqlSync(sql);
 
     CHECK_THROWS(db->execSqlSync("SELECT color FROM things"));
+}
+
+TEST_CASE("una transaccion confirma lo que hizo el cuerpo", "[db][tx]") {
+    TempDb db;
+    db->execSqlSync("CREATE TABLE people (id INTEGER, name TEXT, age INTEGER)");
+
+    drogon::sync_wait(syrax::db::transactionOn(
+        db.get(), [](const syrax::db::Tx& tx) -> drogon::Task<void> {
+            co_await tx.execute("INSERT INTO people VALUES (1, 'ada', 36)");
+            co_await tx.execute("INSERT INTO people VALUES (2, 'alan', 41)");
+        }));
+
+    CHECK(db->execSqlSync("SELECT id FROM people").size() == 2);
+}
+
+TEST_CASE("si el cuerpo lanza, la transaccion se deshace entera", "[db][tx]") {
+    TempDb db;
+    db->execSqlSync("CREATE TABLE people (id INTEGER, name TEXT, age INTEGER)");
+    db->execSqlSync("INSERT INTO people VALUES (9, 'previo', 1)");
+
+    CHECK_THROWS_AS(
+        drogon::sync_wait(syrax::db::transactionOn(
+            db.get(), [](const syrax::db::Tx& tx) -> drogon::Task<void> {
+                co_await tx.execute("INSERT INTO people VALUES (1, 'ada', 36)");
+                throw std::runtime_error("algo salio mal a mitad");
+            })),
+        std::runtime_error);
+
+    // El INSERT de dentro no queda, y lo de antes sigue intacto: eso es lo que
+    // significa "entera".
+    const auto rows = db->execSqlSync("SELECT id FROM people");
+    REQUIRE(rows.size() == 1);
+    CHECK(rows.front()["id"].as<int>() == 9);
+}
+
+TEST_CASE("rollback explicito deshace sin lanzar", "[db][tx]") {
+    TempDb db;
+    db->execSqlSync("CREATE TABLE people (id INTEGER, name TEXT, age INTEGER)");
+
+    // Abortar puede ser una decision de negocio, no un error.
+    const auto aborted = drogon::sync_wait(syrax::db::transactionOn(
+        db.get(), [](const syrax::db::Tx& tx) -> drogon::Task<bool> {
+            co_await tx.execute("INSERT INTO people VALUES (1, 'ada', 36)");
+            tx.rollback();
+            co_return true;
+        }));
+
+    CHECK(aborted);
+    CHECK(db->execSqlSync("SELECT id FROM people").empty());
+}
+
+TEST_CASE("dentro de la transaccion se lee lo que ella misma escribio", "[db][tx]") {
+    TempDb db;
+    db->execSqlSync("CREATE TABLE people (id INTEGER, name TEXT, age INTEGER)");
+
+    const auto found = drogon::sync_wait(syrax::db::transactionOn(
+        db.get(), [](const syrax::db::Tx& tx) -> drogon::Task<std::optional<Person>> {
+            co_await tx.execute("INSERT INTO people VALUES (5, 'grace', 45)");
+            co_return co_await tx.findOne<Person>("SELECT id, name, age FROM people WHERE id = 5");
+        }));
+
+    REQUIRE(found.has_value());
+    CHECK(found->name == "grace");
 }

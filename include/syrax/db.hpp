@@ -133,12 +133,14 @@ inline drogon::orm::DbClientPtr client(const std::string& name = "default") {
     return drogon::app().getDbClient(name);
 }
 
-// SELECT que devuelve varias filas.
-//
-//   auto users = co_await db::query<User>("SELECT * FROM users WHERE age > $1", 18);
+// Las cuatro operaciones van contra un cliente cualquiera. Una Transaction
+// de Drogon ES un DbClient, asi que lo mismo sirve dentro y fuera de una
+// transaccion sin duplicar nada.
+namespace detail {
+
 template <typename T, typename... Args>
-drogon::Task<std::vector<T>> query(std::string sql, Args... args) {
-    const auto result = co_await client()->execSqlCoro(sql, std::move(args)...);
+drogon::Task<std::vector<T>> queryOn(drogon::orm::DbClientPtr on, std::string sql, Args... args) {
+    const auto result = co_await on->execSqlCoro(sql, std::move(args)...);
 
     std::vector<T> rows;
     rows.reserve(result.size());
@@ -148,27 +150,125 @@ drogon::Task<std::vector<T>> query(std::string sql, Args... args) {
     co_return rows;
 }
 
-// SELECT que devuelve una fila o ninguna.
 template <typename T, typename... Args>
-drogon::Task<std::optional<T>> findOne(std::string sql, Args... args) {
-    const auto result = co_await client()->execSqlCoro(sql, std::move(args)...);
+drogon::Task<std::optional<T>> findOneOn(drogon::orm::DbClientPtr on, std::string sql,
+                                         Args... args) {
+    const auto result = co_await on->execSqlCoro(sql, std::move(args)...);
     if (result.empty()) co_return std::nullopt;
 
     co_return fromRow<T>(result.front());
 }
 
+template <typename... Args>
+drogon::Task<std::size_t> executeOn(drogon::orm::DbClientPtr on, std::string sql, Args... args) {
+    const auto result = co_await on->execSqlCoro(sql, std::move(args)...);
+    co_return result.affectedRows();
+}
+
+template <typename T, typename... Args>
+drogon::Task<T> returningOn(drogon::orm::DbClientPtr on, std::string sql, Args... args) {
+    const auto result = co_await on->execSqlCoro(sql, std::move(args)...);
+    co_return fromRow<T>(result.front());
+}
+
+}  // namespace detail
+
+// SELECT que devuelve varias filas.
+//
+//   auto users = co_await db::query<User>("SELECT * FROM users WHERE age > $1", 18);
+template <typename T, typename... Args>
+drogon::Task<std::vector<T>> query(std::string sql, Args... args) {
+    co_return co_await detail::queryOn<T>(client(), std::move(sql), std::move(args)...);
+}
+
+// SELECT que devuelve una fila o ninguna.
+template <typename T, typename... Args>
+drogon::Task<std::optional<T>> findOne(std::string sql, Args... args) {
+    co_return co_await detail::findOneOn<T>(client(), std::move(sql), std::move(args)...);
+}
+
 // INSERT / UPDATE / DELETE. Devuelve las filas afectadas.
 template <typename... Args>
 drogon::Task<std::size_t> execute(std::string sql, Args... args) {
-    const auto result = co_await client()->execSqlCoro(sql, std::move(args)...);
-    co_return result.affectedRows();
+    co_return co_await detail::executeOn(client(), std::move(sql), std::move(args)...);
 }
 
 // INSERT ... RETURNING, que es como se recupera la fila recien creada.
 template <typename T, typename... Args>
 drogon::Task<T> returning(std::string sql, Args... args) {
-    const auto result = co_await client()->execSqlCoro(sql, std::move(args)...);
-    co_return fromRow<T>(result.front());
+    co_return co_await detail::returningOn<T>(client(), std::move(sql), std::move(args)...);
+}
+
+// ------------------------------------------------------------ transaccion
+
+// Las mismas cuatro operaciones, pero dentro de una transaccion.
+//
+// Sin esto, un "comprobar y luego insertar" es una condicion de carrera: dos
+// peticiones simultaneas pueden ver el email libre las dos y crear el usuario
+// las dos. Con transaccion y la restriccion UNIQUE en la tabla, una gana y la
+// otra falla limpio.
+class Tx {
+public:
+    explicit Tx(std::shared_ptr<drogon::orm::Transaction> transaction)
+        : transaction_{std::move(transaction)} {}
+
+    template <typename T, typename... Args>
+    drogon::Task<std::vector<T>> query(std::string sql, Args... args) const {
+        co_return co_await detail::queryOn<T>(transaction_, std::move(sql), std::move(args)...);
+    }
+
+    template <typename T, typename... Args>
+    drogon::Task<std::optional<T>> findOne(std::string sql, Args... args) const {
+        co_return co_await detail::findOneOn<T>(transaction_, std::move(sql), std::move(args)...);
+    }
+
+    template <typename... Args>
+    drogon::Task<std::size_t> execute(std::string sql, Args... args) const {
+        co_return co_await detail::executeOn(transaction_, std::move(sql), std::move(args)...);
+    }
+
+    template <typename T, typename... Args>
+    drogon::Task<T> returning(std::string sql, Args... args) const {
+        co_return co_await detail::returningOn<T>(transaction_, std::move(sql),
+                                                  std::move(args)...);
+    }
+
+    // Deshace lo hecho hasta aqui sin lanzar. Util cuando abortar es una
+    // decision de negocio y no un error.
+    void rollback() const { transaction_->rollback(); }
+
+private:
+    std::shared_ptr<drogon::orm::Transaction> transaction_;
+};
+
+// Corre el cuerpo dentro de una transaccion.
+//
+//   const auto user = co_await db::transaction([](const db::Tx& tx)
+//                                              -> drogon::Task<models::User> {
+//       co_await tx.execute("...");
+//       co_return co_await tx.returning<models::User>("...");
+//   });
+//
+// Drogon confirma la transaccion cuando se destruye el objeto. Si el cuerpo
+// lanza, aqui se deshace explicitamente antes de propagar: dejar que el
+// destructor confirme a medias seria peor que el error original.
+template <typename F>
+auto transactionOn(drogon::orm::DbClientPtr on, F body)
+    -> decltype(body(std::declval<const Tx&>())) {
+    auto     handle = co_await on->newTransactionCoro();
+    const Tx tx{handle};
+
+    try {
+        co_return co_await body(tx);
+    } catch (...) {
+        handle->rollback();
+        throw;
+    }
+}
+
+template <typename F>
+auto transaction(F body) -> decltype(body(std::declval<const Tx&>())) {
+    co_return co_await transactionOn(client(), std::move(body));
 }
 
 }  // namespace syrax::db

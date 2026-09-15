@@ -3,6 +3,7 @@
 #include <drogon/drogon.h>
 #include <glaze/glaze.hpp>
 
+#include <syrax/db.hpp>
 #include <syrax/middleware.hpp>
 #include <syrax/validation.hpp>
 #include <syrax/ws.hpp>
@@ -27,6 +28,35 @@ namespace syrax {
 // para que el codigo de aplicacion no tenga que nombrar a Drogon.
 template <typename T>
 using Task = drogon::Task<T>;
+
+// El puerto donde escuchar, resuelto igual que las credenciales: del entorno,
+// con .env de respaldo. Asi el puerto no queda escrito en el binario y cambia
+// por despliegue sin recompilar.
+//
+//   APP_PORT=3000 ./mi-api
+//
+// Carga el .env por su cuenta para que no importe si se llama antes o despues
+// de configureFromEnv(): loadDotEnv nunca pisa una variable ya existente.
+//
+// Un valor invalido no se ignora en silencio: quien escribio APP_PORT=ocho
+// quiso decir algo, y arrancar en el 8080 como si nada le esconde el error.
+inline std::uint16_t envPort(std::uint16_t fallback = 8080) {
+    db::loadDotEnv();
+
+    const auto raw = db::env("APP_PORT", "");
+    if (raw.empty()) return fallback;
+
+    unsigned   value = 0;
+    const auto end   = raw.data() + raw.size();
+    const auto result = std::from_chars(raw.data(), end, value);
+
+    if (result.ec != std::errc{} || result.ptr != end || value == 0 || value > 65535) {
+        std::cerr << "syrax: APP_PORT='" << raw << "' no es un puerto valido, usando "
+                  << fallback << "\n";
+        return fallback;
+    }
+    return static_cast<std::uint16_t>(value);
+}
 
 namespace detail {
 

@@ -11,6 +11,8 @@
 
 #include <atomic>
 #include <chrono>
+#include <csignal>
+#include <cstdlib>
 #include <cstdint>
 #include <functional>
 #include <iostream>
@@ -734,14 +736,48 @@ inline drogon::Task<void> loop(Worker opts) {
                                        static_cast<double>(opts.idle.count()));
         }
     }
+
+    // Si salimos por una senal y no por maxJobs, conviene decirlo: un worker
+    // que desaparece en silencio parece un worker que se murio.
+    if (opts.maxJobs == 0 || hechos < opts.maxJobs) {
+        std::cout << "\n  worker detenido; no quedan jobs a medias\n";
+    }
     co_return;
 }
+
+namespace detail {
+
+// Un worker que muere a mitad de un job deja ese job reservado hasta que vence
+// su visibilidad, y entonces se reentrega: el usuario recibe el correo dos
+// veces. Como `docker compose down` manda SIGTERM a todo el mundo, eso no es
+// un caso raro, es el caso normal de cada despliegue.
+//
+// La solucion es bajar la bandera y dejar que el loop termine lo que tiene
+// entre manos. Va por setTermSignalHandler y no por std::signal porque Drogon
+// instala el suyo dentro de run(): un std::signal puesto antes se pierde, y
+// el sintoma es justo el que se queria evitar (se comprobo: el worker salia
+// por el manejador de Drogon, sin pasar por aqui).
+inline void stopGracefully() {
+    if (!running()) {
+        // La segunda vez va en serio: si el job en curso esta colgado, quien
+        // pulso Ctrl-C dos veces quiere irse ya.
+        std::_Exit(130);
+    }
+
+    running() = false;
+    std::cout << "\n  terminando el job en curso antes de salir...\n" << std::flush;
+}
+
+}  // namespace detail
 
 // El worker. Levanta el loop de Drogon sin escuchar en ningun puerto: lo unico
 // que hace es sondear la cola, pero dentro del mismo mundo de corrutinas que
 // un controlador, para que un job pueda usar la base y el cache igual.
 inline int work(Worker opts = {}) {
     running() = true;
+
+    drogon::app().setTermSignalHandler(detail::stopGracefully);
+    drogon::app().setIntSignalHandler(detail::stopGracefully);
 
     drogon::app().registerBeginningAdvice([opts] {
         drogon::async_run([opts]() -> drogon::Task<void> {

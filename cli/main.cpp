@@ -581,7 +581,20 @@ int cmdMigrate(const std::string& sub) {
 }
 
 int cmdTest() {
-    if (const int rc = cmdBuild(); rc != 0) return rc;
+    if (!inProject()) return 1;
+
+    // Los tests del proyecto viven detras de una opcion para que el build de
+    // todos los dias no arrastre Catch2. Encenderla aqui es lo que hace que
+    // `syrax test` funcione sin que tengas que acordarte del -D.
+    const std::string gen = fs::exists("/usr/bin/ninja") ? " -G Ninja" : "";
+    if (const int rc = run("cmake -S . -B build -DCMAKE_BUILD_TYPE=Release"
+                           " -DSYRAX_PROJECT_TESTS=ON" + gen);
+        rc != 0) {
+        return rc;
+    }
+
+    if (const int rc = run("cmake --build build"); rc != 0) return rc;
+
     return run("ctest --test-dir build --output-on-failure");
 }
 

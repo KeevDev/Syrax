@@ -61,9 +61,87 @@ file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS
      ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp
      ${CMAKE_CURRENT_SOURCE_DIR}/database/*.cpp)
 
-add_executable(@NAME@ ${SOURCES})
-target_include_directories(@NAME@ PRIVATE src database)
-target_link_libraries(@NAME@ PRIVATE syrax::syrax)
+# Todo menos main.cpp va a una libreria, para que los tests puedan enlazar
+# tus servicios y repositorios. Un ejecutable con main dentro no se puede
+# enlazar dos veces.
+list(REMOVE_ITEM SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp)
+
+add_library(@NAME@_lib STATIC ${SOURCES})
+target_include_directories(@NAME@_lib PUBLIC src database)
+target_link_libraries(@NAME@_lib PUBLIC syrax::syrax)
+
+add_executable(@NAME@ src/main.cpp)
+target_link_libraries(@NAME@ PRIVATE @NAME@_lib)
+
+# Los tests no entran en el build normal: Catch2 hay que bajarlo y no quieres
+# esperarlo cada vez que levantas el servidor. `syrax test` enciende esto.
+option(SYRAX_PROJECT_TESTS "Compila los tests del proyecto" OFF)
+if(SYRAX_PROJECT_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
+)T";
+
+inline constexpr std::string_view kTestsCMake = R"T(include(FetchContent)
+FetchContent_Declare(Catch2
+    GIT_REPOSITORY https://github.com/catchorg/Catch2.git
+    GIT_TAG        v3.16.0
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(Catch2)
+
+# Agregar un archivo de test no obliga a tocar este CMake.
+file(GLOB_RECURSE TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
+
+add_executable(@NAME@_tests ${TEST_SOURCES})
+target_link_libraries(@NAME@_tests PRIVATE @NAME@_lib Catch2::Catch2WithMain)
+
+list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
+include(Catch)
+catch_discover_tests(@NAME@_tests)
+)T";
+
+// Un test de verdad, no un assert(true): ejercita el mapeo a resource y las
+// reglas del request, que son las dos cosas que se rompen al cambiar un
+// modelo. Lo que necesita base de datos va aparte, y por eso no esta aqui.
+inline constexpr std::string_view kTestUser = R"T(#include <catch2/catch_test_macros.hpp>
+
+#include "factories/UserFactory.hpp"
+#include "http/requests/User/UserRequests.hpp"
+#include "http/resources/User/UserResource.hpp"
+
+TEST_CASE("el resource expone solo lo que la API promete") {
+    const auto user     = factories::UserFactory::make(7);
+    const auto resource = resources::from(user);
+
+    CHECK(resource.id == user.id);
+    CHECK(resource.name == user.name);
+
+    // La edad no sale al JSON: si alguien la agrega al resource sin querer,
+    // este test no se entera, pero el de abajo si te dice que cambiaste las
+    // reglas. Para lo que no debe salir, mira el snapshot del /openapi.json.
+}
+
+TEST_CASE("las reglas del request atrapan lo que el tipo no puede") {
+    requests::CreateUser valido{.name = "Ada", .email = "ada@example.com", .age = 36};
+    CHECK(syrax::validate(valido).empty());
+
+    requests::CreateUser sinArroba{.name = "Ada", .email = "no-es-un-email", .age = 36};
+    const auto fallos = syrax::validate(sinArroba);
+
+    REQUIRE(fallos.size() == 1);
+    CHECK(fallos.front().field == "email");
+}
+
+TEST_CASE("validate devuelve todos los fallos, no el primero") {
+    requests::CreateUser malo{.name = "", .email = "tampoco", .age = 999};
+    const auto           fallos = syrax::validate(malo);
+
+    // Cuatro y no tres: un nombre vacio rompe notEmpty Y minLen(2). Cada
+    // regla que falla es un error, que es lo que hace que el 422 los liste
+    // todos y el cliente no tenga que ir descubriendolos de uno en uno.
+    CHECK(fallos.size() == 4);
+}
 )T";
 
 inline constexpr std::string_view kGitignore = R"T(build/
@@ -195,12 +273,149 @@ syrax::App create() {
 inline constexpr std::string_view kGitkeep = R"T()T";
 
 inline constexpr std::string_view kPublicIndex = R"T(<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"><title>@NAME@</title></head>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>@NAME@</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --fondo:   #fbfbfa;  --panel:  #ffffff;  --borde: #e6e4e0;
+  --texto:   #1a1a18;  --tenue:  #6b6862;  --acento: #b4512f;
+  --codigo:  #f4f2ef;
+  --get: #2f6f4f; --post: #2b5d94; --put: #8a6320; --delete: #97352a;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fondo: #161614; --panel: #1e1e1b; --borde: #2f2e2a;
+    --texto: #ebe9e4; --tenue: #9a968e; --acento: #e0805c;
+    --codigo: #24241f;
+    --get: #7fc4a0; --post: #8fb8e8; --put: #d9b070; --delete: #e8907f;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--fondo); color: var(--texto);
+  font: 15px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+.envoltura { max-width: 860px; margin: 0 auto; padding: 56px 24px 80px; }
+header { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+h1 { margin: 0; font-size: 30px; letter-spacing: -0.02em; }
+.estado {
+  display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--tenue);
+}
+.punto { width: 8px; height: 8px; border-radius: 50%; background: var(--tenue); }
+.punto.viva { background: var(--get); }
+.punto.muerta { background: var(--delete); }
+.entradilla { color: var(--tenue); margin: 10px 0 40px; max-width: 60ch; }
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em;
+     color: var(--tenue); margin: 40px 0 14px; font-weight: 600; }
+.rutas { border: 1px solid var(--borde); border-radius: 10px; overflow: hidden;
+         background: var(--panel); }
+.ruta { display: flex; align-items: center; gap: 14px; padding: 11px 16px;
+        border-bottom: 1px solid var(--borde); }
+.ruta:last-child { border-bottom: none; }
+.metodo { font: 600 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+          letter-spacing: 0.06em; min-width: 52px; }
+.get { color: var(--get); } .post { color: var(--post); }
+.put { color: var(--put); } .patch { color: var(--put); } .delete { color: var(--delete); }
+.camino { font: 13px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.vacio { padding: 16px; color: var(--tenue); font-size: 14px; }
+.tarjetas { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+a.tarjeta {
+  display: block; padding: 16px; border: 1px solid var(--borde); border-radius: 10px;
+  background: var(--panel); text-decoration: none; color: inherit;
+  transition: border-color .15s ease, transform .15s ease;
+}
+a.tarjeta:hover { border-color: var(--acento); transform: translateY(-1px); }
+a.tarjeta strong { display: block; margin-bottom: 4px; }
+a.tarjeta span { color: var(--tenue); font-size: 13px; }
+pre { background: var(--codigo); border: 1px solid var(--borde); border-radius: 10px;
+      padding: 16px; overflow-x: auto; margin: 0;
+      font: 13px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; }
+pre .c { color: var(--tenue); }
+footer { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--borde);
+         color: var(--tenue); font-size: 13px; }
+footer a { color: var(--acento); }
+</style>
+</head>
 <body>
-  <h1>@NAME@</h1>
-  <p>Archivos estaticos salen de esta carpeta. La API vive en <code>/api/v1</code>.</p>
-  <p><a href="/docs">Documentacion</a></p>
+<div class="envoltura">
+
+  <header>
+    <h1>@NAME@</h1>
+    <span class="estado"><span class="punto" id="punto"></span><span id="salud">comprobando...</span></span>
+  </header>
+
+  <p class="entradilla">
+    Esta pagina sale de <code>public/index.html</code>. Editala o borrala: no la sirve
+    el framework, es un archivo estatico mas.
+  </p>
+
+  <h2>Rutas</h2>
+  <div class="rutas" id="rutas"><div class="vacio">leyendo /openapi.json...</div></div>
+
+  <h2>A donde ir</h2>
+  <div class="tarjetas">
+    <a class="tarjeta" href="/docs"><strong>Swagger UI</strong><span>probar los endpoints a mano</span></a>
+    <a class="tarjeta" href="/openapi.json"><strong>openapi.json</strong><span>el contrato, para generar clientes</span></a>
+    <a class="tarjeta" href="/health"><strong>/health</strong><span>lo que mira tu orquestador</span></a>
+  </div>
+
+  <h2>Siguientes pasos</h2>
+  <pre><span class="c"># las tablas</span>
+syrax migrate
+
+<span class="c"># datos de ejemplo</span>
+syrax db:seed
+
+<span class="c"># los tests que ya trae tests/</span>
+syrax test
+
+<span class="c"># y mientras editas, esto recompila solo al guardar</span>
+syrax serve</pre>
+
+  <footer>
+    Construido con <a href="https://github.com/KeevDev/Syrax">Syrax</a>.
+  </footer>
+
+</div>
+
+<script>
+const chip = m => '<span class="metodo ' + m + '">' + m.toUpperCase() + '</span>';
+
+fetch('/openapi.json')
+  .then(r => r.ok ? r.json() : Promise.reject())
+  .then(doc => {
+    const filas = [];
+    for (const [camino, metodos] of Object.entries(doc.paths || {})) {
+      for (const metodo of Object.keys(metodos)) {
+        filas.push({ camino, metodo });
+      }
+    }
+    filas.sort((a, b) => a.camino.localeCompare(b.camino) || a.metodo.localeCompare(b.metodo));
+
+    document.getElementById('rutas').innerHTML = filas.length
+      ? filas.map(f => '<div class="ruta">' + chip(f.metodo) +
+                       '<span class="camino">' + f.camino + '</span></div>').join('')
+      : '<div class="vacio">Ninguna ruta registrada todavia.</div>';
+  })
+  .catch(() => {
+    document.getElementById('rutas').innerHTML =
+      '<div class="vacio">No pude leer /openapi.json. Si llamaste a withoutDocs(), es lo esperado.</div>';
+  });
+
+fetch('/health')
+  .then(r => {
+    document.getElementById('punto').className = 'punto ' + (r.ok ? 'viva' : 'muerta');
+    document.getElementById('salud').textContent = r.ok ? 'respondiendo' : 'con problemas';
+  })
+  .catch(() => {
+    document.getElementById('punto').className = 'punto muerta';
+    document.getElementById('salud').textContent = 'sin respuesta';
+  });
+</script>
 </body>
 </html>
 )T";
@@ -865,6 +1080,8 @@ inline constexpr File kProjectFiles[] = {
     {"database/seeders/001_users.sql",           kSeederPostgres,    Engine::Postgres},
     {"database/seeders/001_users.sql",           kSeederSqlite,      Engine::Sqlite},
     {"database/factories/UserFactory.hpp",       kUserFactory},
+    {"tests/CMakeLists.txt",                     kTestsCMake},
+    {"tests/user_test.cpp",                      kTestUser},
 
     {"docker/Dockerfile",                        kDockerfile},
     {".dockerignore",                            kDockerignore},

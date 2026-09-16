@@ -498,7 +498,7 @@ config/app.json           ajustes del servidor (versionado)
 .env.example              las mismas claves, sin valores (SI versionado)
 docker/Dockerfile         imagen multi-etapa
 docker-compose.yml        postgres, si elegiste ese motor
-public/                   estaticos
+public/                   estaticos, con una portada que lee tu propio /openapi.json
 logs/
 
 database/
@@ -521,6 +521,10 @@ src/
 ├── services/User/        logica de negocio
 ├── repositories/User/    SQL
 └── models/User/          la forma de la tabla
+
+tests/
+├── CMakeLists.txt        Catch2, solo cuando corres `syrax test`
+└── user_test.cpp         un test de verdad, para copiar y seguir
 ```
 
 **Por qué existe `http/`:** marca un límite real. Si mañana expones la misma lógica por gRPC, esa carpeta se tira entera y `services/`, `repositories/` y `models/` siguen sirviendo sin tocarse.
@@ -528,6 +532,20 @@ src/
 **Por qué `models/` y `resources/` están separados:** `User` tiene `passwordHash` y `UserResource` no. Un campo privado no puede filtrarse por accidente porque el tipo que se serializa simplemente no lo tiene.
 
 Ninguno de esos nombres los conoce el framework: son archivos C++ normales. Renómbralos o bórralos.
+
+---
+
+### Tests en tu proyecto
+
+`syrax new` deja `tests/` con Catch2 configurado y un test que ya prueba algo real: el mapeo a resource y las reglas del request.
+
+```bash
+syrax test        # baja Catch2 la primera vez, compila y corre ctest
+```
+
+Todo tu código menos `main.cpp` va a una librería (`<proyecto>_lib`) y el ejecutable solo enlaza contra ella. Es lo que permite que un test enlace tus servicios y repositorios: un ejecutable con `main` dentro no se puede enlazar dos veces.
+
+Agregar un archivo a `tests/` no obliga a tocar ningún CMake, y `database/factories/` está ahí para construir objetos de mentira sin repetirte.
 
 ---
 
@@ -548,7 +566,7 @@ Ninguno de esos nombres los conoce el framework: son archivos C++ normales. Ren�
 | `syrax version` | `-v` | versión y origen |
 | `syrax help` | `-h` | esta lista |
 
-> **`syrax test` sirve dentro del repo de Syrax.** Un proyecto recién generado no trae andamiaje de tests —ni `enable_testing()` ni un target—, así que ahí el comando compila y luego `ctest` no encuentra nada. `database/factories/` está puesto para cuando lo traiga.
+> **`syrax test` funciona igual en tu proyecto que en el repo de Syrax.** Baja Catch2, compila `tests/*.cpp` y corre `ctest`. Catch2 vive detrás de una opción (`SYRAX_PROJECT_TESTS`) que enciende ese comando, así que tu `syrax build` y tu `syrax serve` de todos los días no lo arrastran.
 
 ---
 
@@ -582,7 +600,6 @@ Las digo aquí en vez de que las descubras tú:
 - **Un middleware no ve el body *tipado*.** Corre antes del parseo: alcanza los bytes crudos por `request.drogon()->getBody()`, pero no el struct ya validado. Para reglas que dependen del contenido está `rules()`.
 - **`Room` es de un solo proceso.** Un broadcast alcanza a las conexiones de *esta* instancia. Con varias réplicas detrás de un balanceador hace falta un bus externo, que Syrax no trae.
 - **Sin colas ni cache.** Son [no-objetivos](#no-objetivos) deliberados, no pendientes.
-- **Un proyecto generado no trae tests.** `syrax new` crea `database/factories/` pero ningún target de test ni `enable_testing()`. El framework sí está cubierto; tu proyecto tienes que montarlo tú por ahora.
 - **`ccache` solo acierta si el directorio de build es el mismo.** FetchContent deja Drogon *dentro* de `build/`, así que sus rutas de include forman parte de cada compilación: dos directorios distintos son dos entradas distintas y la caché no sirve. Borrar y rehacer `build/` en el mismo sitio sí acierta al 100%. Con `CCACHE_BASEDIR` se puede sortear, pero eso es configuración tuya, no del proyecto.
 - **Pre-1.0.** La API puede cambiar sin aviso.
 

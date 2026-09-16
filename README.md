@@ -1,4 +1,4 @@
-# Syrax
+# Syrax Framework
 <img width="1024" height="205" alt="image" src="https://github.com/user-attachments/assets/10dd0bb6-a67f-4460-b5c8-ecc87ad57838" />
 
 

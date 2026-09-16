@@ -11,7 +11,7 @@
 #include <string>
 
 using Catch::Matchers::ContainsSubstring;
-using testsrv::kPort;
+using testsrv::port;
 using Fixture = testsrv::Server;
 
 namespace {
@@ -30,7 +30,7 @@ Response request(const std::string& method, const std::string& path,
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port   = htons(kPort);
+    addr.sin_port   = htons(port());
     ::inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
 
     REQUIRE(::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);

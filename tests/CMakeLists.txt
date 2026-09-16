@@ -19,12 +19,18 @@ add_executable(syrax_tests
     query_test.cpp
     envport_test.cpp
     config_test.cpp
+    config_typed_test.cpp
     errors_test.cpp
     log_test.cpp
     jobs_test.cpp
     ws_test.cpp
 )
 target_link_libraries(syrax_tests PRIVATE syrax::syrax Catch2::Catch2WithMain)
+
+# El kit de tests va en su propio binario: syrax_tests ya levanta un servidor
+# con test_server.cpp, y Drogon solo admite un app().run() por proceso.
+add_executable(syrax_testing_kit_tests testing_kit_test.cpp health_test.cpp ratelimit_shared_test.cpp etag_test.cpp)
+target_link_libraries(syrax_testing_kit_tests PRIVATE syrax::syrax Catch2::Catch2WithMain)
 
 # Solo se compila, no se ejecuta: es el guardia de que los ejemplos del
 # README siguen siendo codigo valido.
@@ -34,3 +40,4 @@ target_link_libraries(syrax_readme_snippets PRIVATE syrax::syrax)
 list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
 include(Catch)
 catch_discover_tests(syrax_tests)
+catch_discover_tests(syrax_testing_kit_tests)

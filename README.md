@@ -663,13 +663,17 @@ La configuración de un proyecto vive en `src/bootstrap/`, un archivo por cosa q
 
 ```
 src/bootstrap/
-├── app.cpp         junta todo: .env, base de la API, y llama a las de abajo
+├── app.cpp         junta todo: base de la API, y llama a las de abajo
+├── config.cpp      toda la configuración, tipada y validada al arrancar
 ├── database.cpp    la conexión a la base
 ├── cache.cpp       el Redis, si lo enciendes
 ├── queue.cpp       el driver de la cola y los jobs registrados
 ├── middleware.cpp  CORS, rate limit y cabeceras de seguridad
 └── errors.cpp      qué excepciones merecen otro estado
 ```
+
+`config.cpp` va primero y el resto lee de él: así un `DB_POOL=cuatro` falla al
+arrancar con el nombre de la variable, y no en la primera consulta.
 
 ```cpp
 // src/bootstrap/middleware.cpp
@@ -860,6 +864,36 @@ Si el `COMMIT` falla, el job **tampoco existe**. Con Redis son dos sistemas dist
 
 **Un job se ejecuta al menos una vez, no exactamente una vez.** Si el worker muere a mitad, el job sigue reservado hasta que vence `QUEUE_RETRY_AFTER` y entonces vuelve a la cola. Escríbelos de forma que correr dos veces no haga daño: es la misma regla que en cualquier otra cola.
 
+### Rate limiting
+
+El de siempre cuenta en un mapa del proceso:
+
+```cpp
+app.use(syrax::rateLimit(120, std::chrono::minutes{1}));
+```
+
+Con tres réplicas detrás de un balanceador eso deja pasar 360 por minuto, no 120: cada instancia reparte su cuota entera. Para que el número signifique lo que dice, el contador va en Redis:
+
+```cpp
+app.useAsync(syrax::rateLimitShared(120, std::chrono::seconds{60}));
+```
+
+`useAsync` es una segunda cadena de middleware que **puede esperar**, y corre después de todos los síncronos: lo que se puede rechazar sin salir del proceso no paga una ida y vuelta a la red. Los middleware normales siguen siendo síncronos, que es lo que hay que usar mientras sirva.
+
+Los dos aceptan por quién contar. Por IP de fábrica; una API autenticada casi siempre quiere otra cosa:
+
+```cpp
+syrax::rateLimitShared(1000, std::chrono::seconds{60},
+                       [](const syrax::Request& r) { return r.header("X-Api-Key"); });
+```
+
+Dos decisiones que conviene saber:
+
+- **La ventana es fija**, con su índice dentro de la clave. En el peor caso —una ráfaga al final de una ventana y otra al principio de la siguiente— pasan hasta 2x el límite en un intervalo corto. La alternativa deslizante cuesta una entrada por petición; para proteger de abuso, la fija sobra.
+- **Si Redis no responde, la petición pasa.** Un limitador que tumba la API cuando se cae su almacén convierte una degradación en una caída, y existe para proteger la API, no para ser otro motivo de que no funcione.
+
+---
+
 ### Middleware, autenticación y políticas
 
 Un middleware es una función que recibe la petición y devuelve un `Error` para cortar, o nada para dejar pasar. Sin clases, sin registro global:
@@ -935,6 +969,77 @@ Los middlewares de Syrax **no** corren sobre sockets: operan sobre respuestas HT
 
 ---
 
+### Salud
+
+`app.health()` registra un `GET /health` que le pregunta a cada base y cada Redis registrados —un `SELECT 1` y un `PING`—, y contesta **200 si responden y 503 si no**, con el desglose en el cuerpo:
+
+```json
+{"status":"down","checks":[
+  {"name":"database","status":"ok","detail":"","ms":1},
+  {"name":"cache","status":"down","detail":"Connection refused","ms":2}]}
+```
+
+Un 200 fijo no comprueba nada: dice que el proceso está vivo, que es lo que el orquestador ya sabe porque tiene el pid. Con él, un contenedor cuya base está caída se reporta sano y el balanceador le sigue mandando tráfico. Lo que hace útil al healthcheck es justo lo contrario.
+
+Para lo que el framework no puede saber:
+
+```cpp
+syrax::health::probe("s3", []() -> syrax::Task<std::string> {
+    co_return co_await alcanzable() ? "" : "no responde";   // vacio = ok
+});
+```
+
+Una comprobación que lanza es un `down` con el motivo, no un 500: el endpoint no se cae cuando se cae una dependencia.
+
+---
+
+### Configuración tipada
+
+El `env("DB_POOL", "4")` repartido por el bootstrap tiene tres agujeros y los tres se pagan tarde: todo es string, un nombre mal escrito devuelve el valor por defecto en silencio, y nadie valida. `bootstrap/config.hpp` declara la configuración como un tipo:
+
+```cpp
+struct Config {
+    std::string dbEngine = "postgres";
+    int         dbPool   = 4;
+
+    static auto rules() {
+        return syrax::rules(syrax::field(&Config::dbPool).range(1, 64),
+                            syrax::field(&Config::dbEngine).oneOf({"postgres", "mysql", "sqlite"}));
+    }
+};
+```
+
+El nombre de cada variable sale del campo —`dbPool` lee `DB_POOL`—, así que no hay lista que mantener al lado y no se pueden desincronizar. `create()` lo llama primero, antes de conectar nada:
+
+```
+$ DB_POOL=0 QUEUE_DRIVER=kafka ./demo
+
+error: syrax: la configuracion no es valida
+
+  QUEUE_DRIVER
+    debe ser uno de: database, redis
+  DB_POOL
+    debe estar entre 1 y 64
+```
+
+Todos los problemas juntos, no uno por arranque. Y es el mismo `rules()` que ya usan los requests: una sola forma de validar en todo el framework.
+
+Esto **no sustituye a `env()`**. Con cuatro variables el tipo sobra; empieza a pagar cuando son veinte y alguna importa.
+
+---
+
+### ETag y 304
+
+```cpp
+app.etag();
+```
+
+Cada GET de éxito sale con un `ETag` calculado sobre su cuerpo, y una petición que lo traiga en `If-None-Match` recibe un **304 sin cuerpo**. Para un recurso que cambia poco y se pide mucho, eso es la diferencia entre mandar el JSON entero cada vez y mandar una línea de cabeceras.
+
+Ahorra red, no trabajo: el cuerpo se genera igual para poder hashearlo. Ahorrarse también el trabajo obliga a saber cuándo cambió el recurso, y eso solo lo sabe la aplicación.
+
+---
+
 ## Estructura de un proyecto
 
 ```
@@ -959,7 +1064,7 @@ database/
 
 src/
 ├── main.cpp
-├── bootstrap/            configuracion: app.cpp, database.cpp, cache.cpp, queue.cpp
+├── bootstrap/            configuracion: config.cpp primero, luego database, cache, queue
 ├── jobs/                 lo que corre fuera de la peticion
 ├── routes/               el mapa de la API, versionable
 │   ├── routes.cpp        /health y el alta de cada version
@@ -974,7 +1079,9 @@ src/
 
 tests/
 ├── CMakeLists.txt        Catch2, solo cuando corres `syrax test`
-└── user_test.cpp         un test de verdad, para copiar y seguir
+├── api.hpp               la app levantada contra una sqlite temporal
+├── user_test.cpp         las piezas sueltas: resource y reglas
+└── users_api_test.cpp    la peticion entera, de la ruta al SQL
 ```
 
 **Por qué la ruta no vive en el controlador:** `routes/v1.cpp` se lee de un vistazo y dice qué expone esta versión de la API; el controlador dice qué hace cada acción. Cómo se escriben las dos está arriba, en [el camino de una petición](#el-camino-de-una-petición); aquí solo falta de dónde sale el prefijo, que es de la configuración:
@@ -1002,11 +1109,52 @@ Ninguno de esos nombres los conoce el framework: son archivos C++ normales. Ren�
 
 ### Tests en tu proyecto
 
-`syrax new` deja `tests/` con Catch2 configurado y un test que ya prueba algo real: el mapeo a resource y las reglas del request.
+`syrax new` deja `tests/` con Catch2 configurado y dos tests que ya prueban algo real: uno para las piezas sueltas y otro que recorre la petición entera.
 
 ```bash
 syrax test        # baja Catch2 la primera vez, compila y corre ctest
 ```
+
+#### El test que recorre las capas
+
+Un test que solo comprueba que el resource copia bien un campo no dice nada de si la API funciona. `syrax::testing` levanta **tu** aplicación —la que arma `bootstrap::create()`— contra una sqlite temporal, y le habla por TCP:
+
+```cpp
+#include "api.hpp"
+
+TEST_CASE("POST /users crea la fila, y GET la devuelve") {
+    api().fresh();
+
+    const auto creado = api().post("users", R"({"name":"Ada","email":"ada@example.com","age":36})");
+    REQUIRE(creado.status == 201);
+
+    // La fila esta en la base de verdad, no en un doble.
+    const auto filas = api().db()->execSqlSync("SELECT email FROM users");
+    CHECK(filas.front()["email"].as<std::string>() == "ada@example.com");
+
+    const auto leido = api().get("users/" + std::to_string(creado.json<resources::UserResource>().id));
+    CHECK(leido.json<resources::UserResource>().name == "Ada");
+}
+```
+
+Eso pasa por la ruta, el controller, el service, el repositorio y el SQL. **No hay una aplicación "de pruebas"** que se desincronice de la de verdad: si olvidas registrar una ruta, el test lo nota.
+
+No hace falta levantar postgres ni tocar tu `.env`. El kit pone `DB_ENGINE=sqlite` y `DB_FILE` en el entorno antes de llamar a tu `create()`, y como `loadDotEnv()` nunca pisa una variable que ya existe, tu `bootstrap/database.cpp` conecta a la base temporal por su camino de siempre. El archivo se borra al terminar.
+
+| | |
+|---|---|
+| `api().fresh()` | deja la base como recién migrada, y reinicia los autoincrementos |
+| `api().get/post/put/patch/del` | la petición; una ruta relativa (`"users"`) cuelga de `API_BASE`, una absoluta (`"/health"`) no |
+| `api().db()` | el cliente de la base, para sembrar filas o comprobar el estado |
+| `.status`, `.body`, `.ok()` | la respuesta |
+| `.json<T>()` | el cuerpo como el tipo que la API promete; falla si no encaja |
+| `.header("X-Request-Id")` | las cabeceras, sin distinguir mayúsculas |
+
+El cuerpo se puede mandar como texto o como tipo —`api().post("users", requests::CreateUser{...})`—, y `api().header("Authorization", "Bearer ...")` la añade a todas las peticiones siguientes.
+
+**Es una por binario de test**, no una por caso: Drogon solo admite un servidor por proceso. Por eso `api()` es una función y no una variable, para que todos tus archivos de test compartan la misma; lo que aísla un caso del siguiente es `fresh()`.
+
+#### El resto
 
 Todo tu código menos `main.cpp` va a una librería (`<proyecto>_lib`) y el ejecutable solo enlaza contra ella. Es lo que permite que un test enlace tus servicios y repositorios: un ejecutable con `main` dentro no se puede enlazar dos veces.
 
@@ -1035,6 +1183,9 @@ Agregar un archivo a `tests/` no obliga a tocar ningún CMake, y `database/facto
 | `syrax queue:work` | `work` | corre los jobs encolados |
 | `syrax queue:failed` | `q:f` | los que se rindieron, con el motivo |
 | `syrax queue:retry` | `q:r` | devuelve los fallidos a la cola |
+| `syrax db` | | consola del motor configurado, con las credenciales del `.env` |
+| `syrax redis` | | consola de Redis, con las del `.env` |
+| `syrax cache:clear` | `c:c` | vacía la base de Redis configurada (pregunta antes) |
 | `syrax test` | `t` | compila y corre `ctest` (ver nota abajo) |
 | `syrax upgrade` | `-u` | recompila e instala la última versión |
 | `syrax version` | `-v` | versión y origen |

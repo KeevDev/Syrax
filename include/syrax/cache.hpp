@@ -11,6 +11,8 @@
 #include <cstddef>
 #include <optional>
 #include <stdexcept>
+#include <algorithm>
+#include <vector>
 #include <string>
 #include <utility>
 
@@ -30,10 +32,31 @@ struct Connection {
     std::string    name        = "default";
 };
 
+namespace detail {
+
+inline std::vector<std::string>& names() {
+    static std::vector<std::string> value;
+    return value;
+}
+
+}  // namespace detail
+
+// Los nombres de los Redis registrados, por el mismo motivo que en db: Drogon
+// no los expone y /health los necesita para no dar por sana una aplicacion
+// cuyo cache esta caido.
+inline const std::vector<std::string>& registered() {
+    return detail::names();
+}
+
 inline void connect(const Connection& conn) {
     drogon::app().createRedisClient(conn.host, conn.port, conn.name, conn.password,
                                     conn.connections, conn.fast, conn.timeout, conn.database,
                                     conn.username);
+
+    auto& names = detail::names();
+    if (std::find(names.begin(), names.end(), conn.name) == names.end()) {
+        names.push_back(conn.name);
+    }
 }
 
 // Lo que describe el entorno:

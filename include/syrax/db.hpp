@@ -36,6 +36,7 @@
 #include <unordered_map>
 #include <optional>
 #include <stdexcept>
+#include <algorithm>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -197,6 +198,11 @@ struct Connection {
 
 namespace detail {
 
+inline std::vector<std::string>& names() {
+    static std::vector<std::string> value;
+    return value;
+}
+
 // Quien fija el dialecto global cuando hay varias conexiones. La llamada
 // "default" manda; si no hay ninguna con ese nombre, vale la primera.
 inline void adoptDialect(Dialect engine, const std::string& name) {
@@ -208,6 +214,14 @@ inline void adoptDialect(Dialect engine, const std::string& name) {
 }
 
 }  // namespace detail
+
+// Los nombres de las conexiones registradas, en el orden en que se declararon.
+// Drogon no los expone y /health los necesita: sin esto, una comprobacion de
+// salud solo puede preguntar por la conexion "default" y da por buena una
+// aplicacion cuya segunda base esta caida.
+inline const std::vector<std::string>& registered() {
+    return detail::names();
+}
 
 // Registra una conexion en Drogon. Se puede llamar varias veces con nombres
 // distintos: la aplicacion pide cada cliente por su nombre con client("...").
@@ -223,6 +237,11 @@ inline void connect(const Connection& conn) {
     }
 
     detail::adoptDialect(engine, conn.name);
+
+    auto& names = detail::names();
+    if (std::find(names.begin(), names.end(), conn.name) == names.end()) {
+        names.push_back(conn.name);
+    }
 
     const auto port = conn.port != 0 ? conn.port : defaultPort(engine);
 

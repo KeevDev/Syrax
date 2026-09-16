@@ -53,7 +53,7 @@ constexpr Alias kAliases[] = {
     {"work", "queue:work"},        {"q:w", "queue:work"},
     {"q:f", "queue:failed"},       {"q:r", "queue:retry"},
     {"t", "test"},
-    {"r", "routes"},
+    {"r", "routes"},              {"c:c", "cache:clear"},
     {"m:a", "make:api"},           {"m:c", "make:controller"},
     {"m:s:v", "make:service"},     {"m:rp", "make:repository"},
     {"m:j", "make:job"},           {"m:mg", "make:migration"},
@@ -300,7 +300,118 @@ int runSqlDir(const std::string& dir, const std::string& label) {
     return 0;
 }
 
+// La consola del motor configurado, con las credenciales del .env ya puestas.
+// El valor entero del comando es ese: no tener que acordarse de si este
+// proyecto usa el 5432 o el 5433, ni de cual era la contrasena.
+std::string dbConsoleCommand(const std::map<std::string, std::string>& env) {
+    const auto at = [&](const char* k, const char* d) {
+        return env.count(k) ? env.at(k) : std::string{d};
+    };
+
+    const auto engine = at("DB_ENGINE", "postgres");
+
+    if (engine == "sqlite" || engine == "sqlite3") {
+        return "sqlite3 '" + at("DB_FILE", "app.db") + "'";
+    }
+    if (engine == "mysql" || engine == "mariadb") {
+        return "mysql --host=" + at("DB_HOST", "127.0.0.1") + " --port=" + at("DB_PORT", "3306") +
+               " --user=" + at("DB_USER", "root") + " --password=" + at("DB_PASSWORD", "root") +
+               " " + at("DB_NAME", "app");
+    }
+    return "psql 'postgres://" + at("DB_USER", "postgres") + ":" + at("DB_PASSWORD", "postgres") +
+           "@" + at("DB_HOST", "127.0.0.1") + ":" + at("DB_PORT", "5432") + "/" +
+           at("DB_NAME", "app") + "'";
+}
+
+std::string redisConsoleCommand(const std::map<std::string, std::string>& env) {
+    const auto at = [&](const char* k, const char* d) {
+        return env.count(k) ? env.at(k) : std::string{d};
+    };
+
+    std::string cmd = "redis-cli -h " + at("REDIS_HOST", "127.0.0.1") + " -p " +
+                      at("REDIS_PORT", "6379") + " -n " + at("REDIS_DB", "0");
+
+    const auto password = at("REDIS_PASSWORD", "");
+    if (!password.empty()) cmd += " -a '" + password + "' --no-auth-warning";
+
+    return cmd;
+}
+
+// Avisa de que falta el cliente externo en vez de dejar que el shell escupa
+// "command not found", que no dice que instalar.
+bool haveTool(const std::string& tool, const std::string& install) {
+    if (run("command -v " + tool + " > /dev/null 2>&1") == 0) return true;
+
+    std::cerr << "error: no encuentro '" << tool << "' en el PATH.\n"
+              << "  syrax no trae la consola: la abre con las credenciales de tu .env.\n"
+              << "  instala " << install << " y vuelve a intentarlo.\n";
+    return false;
+}
+
 // ------------------------------------------------------------------- comandos
+
+int cmdDbConsole() {
+    if (!inProject()) return 1;
+
+    const auto env    = readEnv();
+    const auto engine = env.count("DB_ENGINE") ? env.at("DB_ENGINE") : "postgres";
+
+    const bool sqlite = (engine == "sqlite" || engine == "sqlite3");
+    const bool mysql  = (engine == "mysql" || engine == "mariadb");
+
+    const std::string tool    = sqlite ? "sqlite3" : mysql ? "mysql" : "psql";
+    const std::string paquete = sqlite   ? "sqlite"
+                                : mysql  ? "mysql-client o mariadb-clients"
+                                         : "postgresql-client (o libpq)";
+
+    if (!haveTool(tool, paquete)) return 1;
+
+    return run(dbConsoleCommand(env));
+}
+
+int cmdRedisConsole() {
+    if (!inProject()) return 1;
+    if (!haveTool("redis-cli", "redis (el paquete trae redis-cli)")) return 1;
+
+    return run(redisConsoleCommand(readEnv()));
+}
+
+int cmdCacheClear(bool force) {
+    if (!inProject()) return 1;
+    if (!haveTool("redis-cli", "redis (el paquete trae redis-cli)")) return 1;
+
+    const auto env = readEnv();
+    const auto at  = [&](const char* k, const char* d) {
+        return env.count(k) ? env.at(k) : std::string{d};
+    };
+
+    const auto host = at("REDIS_HOST", "127.0.0.1");
+    const auto port = at("REDIS_PORT", "6379");
+    const auto db   = at("REDIS_DB", "0");
+
+    // Se pregunta porque FLUSHDB no distingue: borra TODA la base, incluido lo
+    // que haya puesto ahi otra aplicacion que comparta el Redis. Syrax no
+    // prefija sus claves, asi que no hay forma de borrar solo las suyas, y
+    // callarselo seria esconder el unico detalle que importa.
+    if (!force) {
+        std::cout << "esto borra la base " << db << " entera de " << host << ":" << port << "\n"
+                  << "todo lo que haya ahi, sea de syrax o no.\n\n"
+                  << "seguir? [s/N] " << std::flush;
+
+        std::string answer;
+        std::getline(std::cin, answer);
+
+        if (answer != "s" && answer != "S" && answer != "si" && answer != "y") {
+            std::cout << "cancelado\n";
+            return 0;
+        }
+    }
+
+    if (const int rc = run(redisConsoleCommand(env) + " flushdb"); rc != 0) return rc;
+
+    std::cout << "cache vaciado (" << host << ":" << port << " db " << db << ")\n";
+    return 0;
+}
 
 int cmdNew(const std::string& name, tpl::Engine engine, bool engineGiven) {
     if (name.empty()) {
@@ -1060,6 +1171,9 @@ int usage() {
         "  migrate:rollback                      m:r  revierte la ultima\n"
         "  migrate:status                        m:s  muestra cuales estan aplicadas\n"
         "  db:seed                               seed carga database/seeders/*.sql\n"
+        "  db                                         consola del motor, con tu .env puesto\n"
+        "  redis                                      consola de redis, con tu .env puesto\n"
+        "  cache:clear [--force]                 c:c  vacia la base de redis configurada\n"
         "  make:model <tabla>                    m:m  genera el modelo de Drogon (Mapper<T>)\n"
         "\n"
         "  queue:work                            work corre los jobs encolados\n"
@@ -1138,6 +1252,13 @@ int main(int argc, char** argv) {
             return cmdMake(kind == std::string{"entity"} ? "model" : kind,
                            argc > 2 ? argv[2] : "");
         }
+    }
+
+    if (cmd == "db")               return cmdDbConsole();
+    if (cmd == "redis")            return cmdRedisConsole();
+    if (cmd == "cache:clear") {
+        return cmdCacheClear(std::ranges::find(args, "--force") != args.end() ||
+                             std::ranges::find(args, "-f") != args.end());
     }
 
     if (cmd == "routes")           return cmdRoutes();

@@ -414,6 +414,7 @@ private:
     }
 
     Dialect                  dialect_;
+    bool                     quiet_ = false;
     std::vector<std::string> statements_;
 };
 
@@ -472,6 +473,14 @@ public:
         }
     }
 
+    // Calla el progreso. Lo usa el kit de tests: una suite que migra antes de
+    // cada binario no quiere seis lineas de "aplicando" tapando el fallo que
+    // esta buscando. Los errores siguen saliendo por cerr.
+    Migrator& quiet(bool value = true) {
+        quiet_ = value;
+        return *this;
+    }
+
     template <typename M>
     Migrator& add() {
         migrations_.push_back(std::make_unique<M>());
@@ -489,17 +498,17 @@ public:
             Schema schema{dialect_};
             migration->up(schema);
 
-            std::cout << "  aplicando " << migration->name() << std::flush;
+            out() << "  aplicando " << migration->name() << std::flush;
             if (!runAll(schema)) return 1;
 
             client_->execSqlSync("INSERT INTO syrax_migrations (name) VALUES (" +
                                  placeholder(1) + ")",
                                  migration->name());
-            std::cout << "  ok\n";
+            out() << "  ok\n";
             ++applied;
         }
 
-        if (applied == 0) std::cout << "  nada pendiente\n";
+        if (applied == 0) out() << "  nada pendiente\n";
         return 0;
     }
 
@@ -511,7 +520,7 @@ public:
         const auto result =
             client_->execSqlSync("SELECT name FROM syrax_migrations ORDER BY id DESC LIMIT 1");
         if (result.empty()) {
-            std::cout << "  no hay nada que revertir\n";
+            out() << "  no hay nada que revertir\n";
             return 0;
         }
 
@@ -523,12 +532,12 @@ public:
             Schema schema{dialect_};
             migration->down(schema);
 
-            std::cout << "  revirtiendo " << last << std::flush;
+            out() << "  revirtiendo " << last << std::flush;
             if (!runAll(schema)) return 1;
 
             client_->execSqlSync(
                 "DELETE FROM syrax_migrations WHERE name = " + placeholder(1), last);
-            std::cout << "  ok\n";
+            out() << "  ok\n";
             return 0;
         }
 
@@ -549,6 +558,13 @@ public:
     }
 
 private:
+    // Un sumidero con rdbuf nulo se traga lo que se le escriba. Sale mas
+    // limpio que repartir un if por cada traza de progreso.
+    std::ostream& out() const {
+        static std::ostream sink{nullptr};
+        return quiet_ ? sink : std::cout;
+    }
+
     // Drogon reintenta la conexion en bucle y escupe el mismo error cada
     // segundo, sin decir que revisar. Una consulta trivial primero convierte
     // ese muro de ruido en un mensaje accionable.
@@ -634,6 +650,7 @@ private:
     drogon::orm::DbClientPtr                client_;
     std::vector<std::unique_ptr<Migration>> migrations_;
     Dialect                                 dialect_ = Dialect::Postgres;
+    bool                                    quiet_   = false;
 };
 
 }  // namespace syrax

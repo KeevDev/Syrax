@@ -18,7 +18,7 @@ a veces con otro nombre. Conviene mirar aquí primero.
 
 | Lo que se pide | Dónde está | Matiz |
 |---|---|---|
-| **Rate limiting** | `middleware.hpp` → `rateLimit()` | El contador vive en el proceso. La versión compartida está en el nivel 2. |
+| **Rate limiting** | `middleware.hpp` → `rateLimit()` y `rateLimitShared()` | El primero cuenta en el proceso; el segundo en Redis, para que el límite valga con varias instancias. Los dos aceptan por quién contar. |
 | **CORS configurable** | `middleware.hpp` → `CorsOptions` | Ya es configurable: `origins`, `methods`, `headers`, `credentials`, `maxAge`, y desde el nivel 1 viene cableado en `bootstrap/middleware.cpp`. |
 | **API Keys** | `middleware.hpp` → `requireApiKey()` | Con cabecera configurable. |
 | **JWT** | `auth.hpp` → `sign`, `verify`, `bearer` | Y `hashPassword`/`verifyPassword` con PBKDF2, que suele faltar. |
@@ -27,6 +27,8 @@ a veces con otro nombre. Conviene mirar aquí primero.
 | **RBAC** | `policy.hpp` → `requireRole(actor, "admin", "editor")` | Roles simples. Una tabla de permisos editable en runtime es aplicación, no framework. |
 | **DTOs** | `resources/` y `requests/` del andamiaje | Son DTOs de entrada y de salida, con el nombre que usa el README. |
 | **Cache abstraction** | `cache.hpp` → `get/put/forget/has/remember` | La abstracción existe; el único driver es Redis. |
+| **Healthcheck** | `health.hpp` → `app.health()` | Pregunta a cada base y cada Redis registrados. `health::probe()` agrega las del proyecto. |
+| **Configuración tipada** | `config.hpp` → `config::load<T>()` | Del entorno por reflexión, validada al arrancar con las mismas `rules()` del resto. |
 | **Connection pooling configurable** | `db::Connection::connections`, env `DB_POOL` | |
 | **Multi-database** | `db::client("nombre")` + `queryOn` / `executeOn` / `transactionOn` | **Ya funciona hoy.** Lo que falta es azúcar en bootstrap y un apartado en el README, no código. |
 | **Manejo de response JSON** | `Result<T>` + `makeOk` / `makeError` | El handler devuelve el valor o el `Error`; el borde lo traduce. |
@@ -36,7 +38,7 @@ a veces con otro nombre. Conviene mirar aquí primero.
 
 ---
 
-## Nivel 1 — hecho
+## Hecho
 
 Entregado y verificado sobre un proyecto generado. Queda aquí como registro de
 qué se cerró; lo que sigue pendiente está en el nivel 2.
@@ -50,12 +52,24 @@ qué se cerró; lo que sigue pendiente está en el nivel 2.
 | **Generadores por capa** | `make:api` y las seis capas por separado, más `make:job` y `make:migration`, que además **se registran solos**. |
 | **`syrax routes`** | Método, ruta y alias, sin levantar el servidor. |
 | **Apagado ordenado** | `setTermSignalHandler`: el worker termina el job en curso y sale; un segundo Ctrl-C sale ya. |
+| **Tests en paralelo** | El puerto de `tests/test_server.cpp` lo elige el kernel con `run(0)` y Drogon dice cuál tocó. `ctest -j8` pasa los 209; antes fallaban 13. |
+| **Kit de tests** `syrax::testing` | `testing.hpp`: levanta la aplicación real del proyecto contra una sqlite temporal y le habla por TCP. `syrax new` deja un test que va ruta → controller → service → repositorio → SQL. |
+| **`/health` de verdad** | `health.hpp` + `app.health()`: un `SELECT 1` por base y un `PING` por Redis registrados. 200 si responden, 503 con el desglose si no. `health::probe()` agrega las del proyecto. |
+| **Configuración tipada** | `config.hpp`: un `struct Config` se llena del entorno por reflexión (`dbPool` lee `DB_POOL`) y se valida con las mismas `rules()` del resto. Falla al arrancar con el nombre de la variable y todos los problemas juntos. El andamiaje trae `bootstrap/config.cpp` y los demás `bootstrap/` leen de ahí. |
+| **Rate limit con Redis** | `rateLimitShared()`, sobre una cadena de middleware asíncrona nueva (`useAsync`). Ventana fija con el índice en la clave; si Redis no responde, la petición pasa. Los dos limitadores aceptan una función de clave: por IP de fábrica, por cabecera o por usuario si se pide. |
+| **ETag / 304** | `app.etag()`: SHA-256 truncado del cuerpo en cada GET de éxito, y 304 sin cuerpo si el `If-None-Match` coincide. |
+| **CLI: `db`, `redis`, `cache:clear`** | Consolas con las credenciales del `.env` ya puestas, para los tres motores. `cache:clear` pregunta antes, porque `FLUSHDB` no distingue lo de Syrax de lo que haya puesto otra aplicación en el mismo Redis. |
 
-Dos cosas que cambiaron de plan por el camino:
+Tres cosas que cambiaron de plan por el camino:
 
 - **No hay `bootstrap/logging.cpp`.** Las tres variables de entorno ya configuran
   el log, y un archivo que sólo las relee es ruido en un directorio donde cada
   archivo debería justificar su sitio.
+- **El kit de tests no redirige la base con un gancho nuevo.** La idea era un
+  `db::use()` que el test pudiera pisar. No hizo falta: `loadDotEnv()` escribe
+  con `overwrite=0`, así que poner `DB_ENGINE` y `DB_FILE` en el entorno antes
+  de llamar a `create()` ya le gana al `.env`, y el proyecto conecta a la sqlite
+  temporal por su camino de siempre. Una costura menos que mantener.
 - **La vista en vivo no la pinta el CLI.** Parsear el stdout del hijo era la idea
   original; el framework ya sabe si está delante de una terminal, así que la
   línea en color la escribe él. Menos piezas y el mismo resultado.
@@ -64,23 +78,16 @@ Dos cosas que cambiaron de plan por el camino:
 
 | Qué | Por qué | Coste |
 |---|---|---|
-| **Kit de tests** `syrax::testing` | Sigue siendo el hueco real: los tests generados no tocan servicio ni repositorio. Un fixture sqlite más un cliente HTTP en proceso permite un test que va ruta → controller → service → repositorio → SQL de verdad. Es lo único del nivel 1 que quedó fuera, por tamaño. | Medio |
-| **Puerto libre en los tests del propio Syrax** | `tests/test_server.cpp` usa un puerto fijo, así que `ctest -j8` hace colisionar los procesos que levantan servidor. En serie pasan los 209. Pedir un puerto libre al arrancar lo arregla. | Bajo |
-| **Configuración tipada** | Hoy todo es `env("DB_POOL", "4")`: strings y un fallo tipográfico que no se nota hasta producción. Con la reflexión de Glaze que ya se usa, un `struct Config` se puede llenar desde el entorno y **validar al arrancar**, con el nombre del campo en el error. Encaja con la casa. | Medio |
 | **Scheduler** | Era no-objetivo cuando no había colas. Ahora reusa `jobs::dispatch` y el delta es mínimo. Finito si se rechazan las expresiones cron y se ofrece `every(5min)` / `dailyAt("03:00")`. | Bajo |
-| **Rate limit con Redis** | El actual es un mapa en memoria: con dos instancias el límite se duplica. El cliente Redis ya está. | Bajo |
 | **`Idempotency-Key`** | El reintento del cliente crea el pedido dos veces. Casi ningún framework lo trae y en una API que cobra es obligatorio. Finito: guardar la respuesta N horas. | Bajo |
-| **`/health` de verdad** | El del andamiaje devuelve 200 fijo, así que el healthcheck de Docker miente cuando la base está caída. Que pregunte a cada cliente registrado. | Bajo |
 | **Paginación estándar** | `limit`/`offset` están, pero cada API reinventa el sobre `{data, total, page}`. Que `Query<T>::paginate(page, per)` lo devuelva y OpenAPI lo documente. | Bajo |
 | **Serialización parcial** (`?fields=id,nombre`) | El cliente móvil no quiere 30 campos. Con `glz::reflect` los nombres ya están en tiempo de compilación, así que filtrar es barato y no hace falta un lenguaje de query. | Medio |
 | **Validar tokens de terceros** (`auth::jwks(url)`) | La parte finita y útil de OAuth2/OIDC: verificar la firma de un token de Auth0, Keycloak o Cognito contra su JWKS, con caché de claves. *Ser* el proveedor no entra (ver abajo). | Medio |
 | **Scopes** | `requireScope(actor, "pedidos:escribir")` junto a `requireRole`. Veinte líneas, y es lo que esperan los tokens de terceros del punto anterior. | Bajo |
 | **Soft deletes y timestamps** | `deleted_at` filtrado por defecto, `created_at`/`updated_at` automáticos. La conveniencia que todo el mundo reimplementa mal. | Medio |
 | **Subida de archivos con reglas** | `request.file("avatar")` con límites de tamaño y mime en el mismo lenguaje que `validation`. El guardado no: eso es storage, y storage no es finito. | Medio |
-| **ETag / 304** | Para GET de recursos que cambian poco. Una línea en la cadena de respuesta. | Bajo |
 | **Auditoría** | Tabla append-only con quién, qué y cuándo, alimentada desde el `Actor` y el request-id. Se apoya entera en la capa de trazabilidad. | Medio |
 | **Cliente HTTP** | Toda API llama a otra API. Drogon ya trae el cliente; lo que falta es lo que siempre se escribe a mano mal: timeout por defecto, reintento con espera creciente sólo en métodos idempotentes, y **propagar el `X-Request-Id`** para que la traza cruce el salto. Se planta ahí: sin breaker, sin descubrimiento. | Medio |
-| **CLI: `cache:clear`, `db`, `redis`** | Consolas y limpieza. Son envoltorios del cliente que ya está configurado en el proyecto: el valor es no tener que recordar el puerto ni la contraseña del `.env`. | Bajo |
 | **Métricas** | Frontera: cuatro contadores en `/metrics` sí es finito; el día que alguien pida histogramas con labels, no. Después del nivel 1. | Medio |
 | **`syrax new` con asistente** | Preguntar base, cache, auth y docs en vez de sólo el motor. **Con cuidado:** cada eje multiplica las combinaciones que hay que compilar en el CI. Entra sólo si cada pregunta cambia archivos de verdad, y con pocos ejes. | Medio |
 | **Multi-tenancy por fila** | `tenant_id` con un scope global en `Query<T>`. Sólo el modelo de fila: el de esquema y el de base por tenant son decisiones que no se pueden desandar, y un framework no debería elegirlas por ti. | Medio |
@@ -128,10 +135,13 @@ de arriba aterrizan justo ahí:
 |---|---|---|
 | `middleware.cpp` | CORS, rate limit, cabeceras de seguridad, api key | Nivel 1 |
 | `errors.cpp` | Formato del error y traducción de excepciones | Nivel 1 |
-| `logging.cpp` | Destino, formato y nivel del log; request-id | Nivel 1 |
 | `schedule.cpp` | Tareas periódicas | Nivel 2 |
 
-Y uno que conviene **no** crear: `routes.cpp` ya existe aparte y es donde debe
+Y dos que conviene **no** crear. `logging.cpp` no está en esa tabla a propósito:
+`LOG_FORMAT`, `LOG_LEVEL` y `LOG_ACCESS` ya configuran el log, y `log::install()`
+lo llama `App::run()` por su cuenta, así que el archivo no tendría ninguna
+decisión que guardar —sólo releería variables que el framework ya lee—. Y
+`routes.cpp` ya existe aparte y es donde debe
 seguir. El día que `create()` tenga diez llamadas, el problema no es que falte
 un archivo más: es que la aplicación necesita módulos, y eso es otra discusión.
 

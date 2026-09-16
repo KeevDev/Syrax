@@ -5,6 +5,7 @@
 #include <catch2/reporters/catch_reporter_registrars.hpp>
 
 #include <atomic>
+#include <cstdint>
 #include <stdexcept>
 #include <chrono>
 #include <mutex>
@@ -25,6 +26,11 @@ std::thread& serverThread() {
 std::atomic<int>& closes() {
     static std::atomic<int> n{0};
     return n;
+}
+
+std::atomic<std::uint16_t>& boundPort() {
+    static std::atomic<std::uint16_t> value{0};
+    return value;
 }
 
 // Sin esto, el proceso termina con el servidor todavia vivo y Drogon aborta
@@ -50,6 +56,8 @@ Room& room() {
 }
 
 int closeCount() { return closes(); }
+
+std::uint16_t port() { return boundPort(); }
 
 void ensureServer() {
     static std::once_flag once;
@@ -118,8 +126,15 @@ void ensureServer() {
                 .onClose   = [](const Socket& s) { room().leave(s); },
             });
 
-            drogon::app().registerBeginningAdvice([] { ready = true; });
-            app.run(kPort);
+            // El aviso corre con el listener ya arriba, que es cuando Drogon
+            // sabe que puerto le dio el kernel. Nada de REQUIRE aqui: esto no
+            // es el hilo del test y Catch2 no lo soporta.
+            drogon::app().registerBeginningAdvice([] {
+                const auto listeners = drogon::app().getListeners();
+                if (!listeners.empty()) boundPort() = listeners.front().toPort();
+                ready = true;
+            });
+            app.run(0);
         });
 
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
@@ -127,6 +142,7 @@ void ensureServer() {
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
         REQUIRE(ready);
+        REQUIRE(boundPort() != 0);
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     });
 }

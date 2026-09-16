@@ -10,7 +10,10 @@
 // segundo run() se pisa con el primero y el binario aborta al salir.
 namespace testsrv {
 
-constexpr std::uint16_t kPort = 18099;
+// El puerto lo elige el kernel, no nosotros. Con un numero fijo, dos binarios
+// de test corriendo a la vez —lo que hace `ctest -j8`— pelean por el mismo y el
+// segundo no llega a escuchar. Solo tiene valor despues de ensureServer().
+std::uint16_t port();
 
 struct CreateThing {
     std::string name;

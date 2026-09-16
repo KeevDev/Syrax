@@ -2,9 +2,11 @@
 
 #include <drogon/drogon.h>
 #include <glaze/glaze.hpp>
+#include <openssl/sha.h>
 
 #include <syrax/db.hpp>
 #include <syrax/errors.hpp>
+#include <syrax/health.hpp>
 #include <syrax/log.hpp>
 #include <syrax/middleware.hpp>
 #include <syrax/validation.hpp>
@@ -222,6 +224,28 @@ std::optional<T> convertParam(const std::string& s) {
 
 // Todo error sale por syrax::render(), que es donde la aplicacion puede
 // haber puesto su propio formato con onError().
+// La huella de un cuerpo. SHA-256 truncado a 16 bytes: de sobra para que dos
+// cuerpos distintos no colisionen, y la mitad de cabecera que el hash entero.
+//
+// Va entre comillas porque la especificacion lo pide asi, y un ETag sin ellas
+// lo rechazan algunos intermediarios en silencio.
+inline std::string etagOf(std::string_view body) {
+    unsigned char digest[SHA256_DIGEST_LENGTH];
+    ::SHA256(reinterpret_cast<const unsigned char*>(body.data()), body.size(), digest);
+
+    static constexpr char kHex[] = "0123456789abcdef";
+
+    std::string out;
+    out.reserve(34);
+    out += '"';
+    for (int i = 0; i < 16; ++i) {
+        out += kHex[digest[i] >> 4];
+        out += kHex[digest[i] & 0x0F];
+    }
+    out += '"';
+    return out;
+}
+
 inline drogon::HttpResponsePtr makeError(int status, std::string message) {
     return render(Error{status, std::move(message)});
 }
@@ -409,6 +433,19 @@ public:
         return *this;
     }
 
+    // Middleware que puede esperar: una consulta a Redis o a la base antes de
+    // decidir. Corre despues de TODOS los sincronos, para que lo que se puede
+    // rechazar sin salir del proceso no pague una ida y vuelta a la red.
+    App& useAsync(AsyncMiddleware middleware) {
+        asyncMiddlewares_.push_back({.prefix = {}, .fn = std::move(middleware)});
+        return *this;
+    }
+
+    App& useAsync(std::string prefix, AsyncMiddleware middleware) {
+        asyncMiddlewares_.push_back({.prefix = std::move(prefix), .fn = std::move(middleware)});
+        return *this;
+    }
+
     // Modifica cada respuesta ya construida (cabeceras de seguridad, CORS).
     App& useOnResponse(ResponseMiddleware middleware) {
         responseMiddlewares_.push_back(std::move(middleware));
@@ -505,6 +542,71 @@ public:
         return *this;
     }
 
+    // El endpoint de salud, que pregunta a cada base y cada Redis registrados
+    // en vez de devolver un 200 fijo. 200 si todo responde, 503 si algo no.
+    //
+    // Va por registerHandler y no por get() porque el status depende del
+    // resultado, y el de una ruta normal se fija al registrarla: es
+    // precisamente lo que un healthcheck no puede hacer. El cuerpo lleva el
+    // desglose, para que el 503 diga QUE se cayo y no solo que algo se cayo.
+    App& health(const std::string& path = "/health") {
+        note(drogon::Get, path, {}, detail::schemaOf<syrax::health::Report>(), 200);
+
+        drogon::app().registerHandler(
+            path,
+            [](drogon::HttpRequestPtr, detail::Callback cb) -> drogon::Task<> {
+                const auto report = co_await syrax::health::check();
+                cb(detail::makeOk(report, report.ok() ? 200 : 503));
+            },
+            {drogon::Get});
+        return *this;
+    }
+
+    // ETag y 304 para los GET.
+    //
+    // Cada respuesta de exito sale con un ETag calculado sobre su cuerpo, y una
+    // peticion que traiga ese mismo ETag en `If-None-Match` recibe un 304 sin
+    // cuerpo. Para un recurso que cambia poco y se pide mucho —un catalogo, un
+    // perfil, una lista de opciones— eso es la diferencia entre mandar el JSON
+    // entero cada vez y mandar una linea de cabeceras.
+    //
+    // Es un ETag *debil* en el sentido que importa: se calcula sobre los bytes
+    // que se iban a mandar de todas formas, asi que ahorra RED pero no ahorra
+    // el trabajo de generarlos. Ahorrarse tambien el trabajo obliga a saber
+    // cuando cambio el recurso, y eso solo lo sabe la aplicacion.
+    //
+    // Va por PostHandling y no por la cadena de respuesta porque hace falta ver
+    // el REQUEST —la cabecera If-None-Match— y la cadena de respuesta solo ve
+    // la respuesta.
+    App& etag() {
+        drogon::app().registerPostHandlingAdvice(
+            [](const drogon::HttpRequestPtr& req, const drogon::HttpResponsePtr& resp) {
+                // Solo GET y HEAD: un POST que devuelve 201 no es cacheable, y
+                // un 304 a un DELETE seria mentira.
+                const auto method = req->method();
+                if (method != drogon::Get && method != drogon::Head) return;
+
+                if (resp->statusCode() != drogon::k200OK) return;
+
+                const auto body = resp->body();
+                if (body.empty()) return;
+
+                const auto tag = detail::etagOf(body);
+                resp->addHeader("ETag", tag);
+
+                // If-None-Match admite una lista y el comodin. Comparar por
+                // substring es suficiente aqui y evita un parser por una coma.
+                const auto sent = req->getHeader("If-None-Match");
+                if (sent.empty()) return;
+
+                if (sent == "*" || sent.find(tag) != std::string::npos) {
+                    resp->setStatusCode(drogon::k304NotModified);
+                    resp->setBody("");
+                }
+            });
+        return *this;
+    }
+
     // Apaga /docs y /openapi.json (por ejemplo, en produccion).
     App& withoutDocs() {
         docsEnabled_ = false;
@@ -549,7 +651,13 @@ public:
         // El banner se imprime cuando el listener ya esta arriba, no antes:
         // si el puerto esta ocupado no tiene sentido anunciar una URL que no
         // responde.
-        drogon::app().registerBeginningAdvice([this, port] { banner(port); });
+        // Con run(0) el puerto lo elige el kernel, asi que el numero real solo
+        // se sabe cuando el listener ya esta arriba: preguntarselo a Drogon
+        // evita anunciar un ":0" que no lleva a ninguna parte.
+        drogon::app().registerBeginningAdvice([this, port] {
+            const auto listeners = drogon::app().getListeners();
+            banner(listeners.empty() ? port : listeners.front().toPort());
+        });
 
         drogon::app().addListener("0.0.0.0", port).run();
     }
@@ -583,15 +691,20 @@ private:
         Middleware  fn;
     };
 
+    struct AsyncScoped {
+        std::string     prefix;
+        AsyncMiddleware fn;
+    };
+
     void registerMiddlewares() {
         if (cors_) registerCors();
 
-        if (!middlewares_.empty()) {
+        if (!middlewares_.empty() || !asyncMiddlewares_.empty()) {
             drogon::app().registerPreHandlingAdvice(
-                [chain = middlewares_](const drogon::HttpRequestPtr& req,
-                                       drogon::AdviceCallback&&      respond,
-                                       drogon::AdviceChainCallback&& next) {
-                    Request request{req};
+                [chain = middlewares_, asyncChain = asyncMiddlewares_](
+                    const drogon::HttpRequestPtr& req, drogon::AdviceCallback&& respond,
+                    drogon::AdviceChainCallback&& next) {
+                    Request    request{req};
                     const auto path = request.path();
 
                     for (const auto& entry : chain) {
@@ -602,7 +715,32 @@ private:
                             return;
                         }
                     }
-                    next();
+
+                    if (asyncChain.empty()) {
+                        next();
+                        return;
+                    }
+
+                    // Los callbacks de Drogon se pueden llamar desde cualquier
+                    // continuacion, asi que la cadena asincrona no obliga a
+                    // cambiar nada de la sincrona: solo se le cede el turno.
+                    //
+                    // Todo va por copia porque la corrutina sobrevive a este
+                    // marco. Request lleva un shared_ptr dentro, asi que
+                    // copiarlo es barato y mantiene el request vivo.
+                    drogon::async_run([asyncChain, request, path,
+                                       respond = std::move(respond),
+                                       next    = std::move(next)]() mutable -> drogon::Task<> {
+                        for (const auto& entry : asyncChain) {
+                            if (!entry.prefix.empty() && !path.starts_with(entry.prefix)) continue;
+
+                            if (const auto error = co_await entry.fn(request)) {
+                                respond(render(*error));
+                                co_return;
+                            }
+                        }
+                        next();
+                    });
                 });
         }
 
@@ -716,6 +854,7 @@ private:
     }
 
     std::vector<Scoped>             middlewares_;
+    std::vector<AsyncScoped>        asyncMiddlewares_;
     std::vector<ResponseMiddleware>  responseMiddlewares_;
     std::optional<CorsOptions>       cors_;
     std::vector<RouteInfo>           routes_;

@@ -108,6 +108,89 @@ include(Catch)
 catch_discover_tests(@NAME@_tests)
 )T";
 
+inline constexpr std::string_view kTestApi = R"T(#pragma once
+
+#include <syrax/testing.hpp>
+
+#include "bootstrap/app.hpp"
+#include "migrations.hpp"
+
+// La aplicacion de verdad —la que arma bootstrap::create()— levantada contra
+// una sqlite temporal que se borra al terminar. No hay una app "de pruebas"
+// que se desincronice: si olvidas registrar una ruta, el test lo nota.
+//
+// Es UNA por binario de test, no una por caso: Drogon solo admite un servidor
+// por proceso. Por eso vive detras de una funcion, para que todos los archivos
+// de test compartan la misma. Lo que aisla un caso del siguiente es fresh().
+inline syrax::testing::App& api() {
+    static syrax::testing::App app{{
+        .create     = bootstrap::create,
+        .migrations = registerMigrations,
+    }};
+    return app;
+}
+)T";
+
+inline constexpr std::string_view kTestUsersApi = R"T(// El test que recorre las capas de verdad: ruta -> controller -> service ->
+// repositorio -> SQL. Los de user_test.cpp comprueban piezas sueltas; este
+// comprueba que encajan.
+//
+// La ruta relativa cuelga de API_BASE, asi que "users" llega a /api/v1/users.
+// Una que empiece por "/" se manda tal cual, para lo que vive fuera de la API.
+
+#include "api.hpp"
+
+#include "http/resources/User/UserResource.hpp"
+
+#include <catch2/catch_test_macros.hpp>
+
+#include <string>
+#include <vector>
+
+TEST_CASE("POST /users crea la fila, y GET la devuelve") {
+    api().fresh();
+
+    const auto creado = api().post("users", R"J({"name":"Ada","email":"ada@example.com","age":36})J");
+    REQUIRE(creado.status == 201);
+
+    const auto id = creado.json<resources::UserResource>().id;
+
+    // La fila esta en la base, no en un doble.
+    const auto filas = api().db()->execSqlSync("SELECT name, email FROM users");
+    REQUIRE(filas.size() == 1);
+    CHECK(filas.front()["email"].as<std::string>() == "ada@example.com");
+
+    // Y vuelve por el otro extremo, con el id que asigno la base.
+    const auto leido = api().get("users/" + std::to_string(id));
+    CHECK(leido.status == 200);
+    CHECK(leido.json<resources::UserResource>().name == "Ada");
+}
+
+TEST_CASE("fresh() deja la base como recien migrada") {
+    api().fresh();
+    CHECK(api().get("users").json<std::vector<resources::UserResource>>().empty());
+}
+
+TEST_CASE("las reglas del request se aplican en la ruta, no solo en el tipo") {
+    api().fresh();
+
+    const auto invalido = api().post("users", R"J({"name":"A","email":"no","age":5})J");
+
+    // 422 y los tres campos: es lo que ve el cliente, no lo que devuelve
+    // validate() por dentro.
+    CHECK(invalido.status == 422);
+}
+
+TEST_CASE("un id que no existe da 404") {
+    api().fresh();
+    CHECK(api().get("users/9999").status == 404);
+}
+
+TEST_CASE("cada respuesta lleva su request-id") {
+    CHECK_FALSE(api().get("users").header("X-Request-Id").empty());
+}
+)T";
+
 inline constexpr std::string_view kTestUser = R"T(#include <catch2/catch_test_macros.hpp>
 
 #include "factories/UserFactory.hpp"
@@ -348,6 +431,7 @@ syrax::App create();
 inline constexpr std::string_view kBootstrapCpp = R"T(#include "bootstrap/app.hpp"
 
 #include "bootstrap/cache.hpp"
+#include "bootstrap/config.hpp"
 #include "bootstrap/database.hpp"
 #include "bootstrap/errors.hpp"
 #include "bootstrap/middleware.hpp"
@@ -359,7 +443,10 @@ inline constexpr std::string_view kBootstrapCpp = R"T(#include "bootstrap/app.hp
 namespace bootstrap {
 
 syrax::App create() {
-    syrax::loadDotEnv();
+    // Primero de todo, y a proposito: config() lee el entorno y valida. Si
+    // DB_POOL trae "cuatro", el fallo sale aqui con el nombre de la variable,
+    // y no mas tarde con una consulta que se queda esperando.
+    const auto& cfg = config();
 
     if (std::filesystem::exists("config/app.json")) {
         drogon::app().loadConfigFile("config/app.json");
@@ -372,12 +459,92 @@ syrax::App create() {
 
     syrax::App app;
 
-    app.docs(syrax::env("APP_NAME", "@NAME@"), syrax::env("APP_VERSION", "1.0.0"));
-    app.base(syrax::env("API_BASE", "/api/v1"));
+    app.docs(cfg.appName, cfg.appVersion);
+    app.base(cfg.apiBase);
 
     middleware(app);
     registerRoutes(app);
     return app;
+}
+
+}  // namespace bootstrap
+)T";
+
+inline constexpr std::string_view kBootstrapConfigH = R"T(#pragma once
+
+#include <syrax/syrax.hpp>
+
+#include <cstdint>
+#include <string>
+
+namespace bootstrap {
+
+// Toda la configuracion del proyecto, en un sitio y con su tipo.
+//
+// El nombre de cada variable sale del campo: `dbPool` lee DB_POOL. No hay lista
+// que mantener al lado, asi que el .env y esto no se pueden desincronizar.
+//
+// El valor por defecto va aqui, en el campo, que es donde alguien lo va a
+// buscar. Y las reglas de abajo corren AL ARRANCAR: un DB_POOL=0 falla con una
+// frase, en vez de dejar la primera consulta esperando para siempre.
+struct Config {
+    std::string appName    = "@NAME@";
+    std::string appVersion = "1.0.0";
+    std::uint16_t appPort  = 8080;
+    std::string apiBase    = "/api/v1";
+
+    std::string   dbEngine   = "@DBENGINE@";
+    std::string   dbHost     = "127.0.0.1";
+    std::uint16_t dbPort     = 0;  // 0 toma el puerto habitual del motor
+    std::string   dbName     = "@NAME@";
+    std::string   dbUser     = "@DBUSER@";
+    std::string   dbPassword = "@DBUSER@";
+    std::string   dbFile     = "app.db";
+    std::string   dbCharset  = "";
+    int           dbPool     = 4;
+
+    bool          cacheEnabled  = false;
+    std::string   redisHost     = "127.0.0.1";
+    std::uint16_t redisPort     = 6379;
+    std::string   redisPassword = "";
+    int           redisDb       = 0;
+    int           redisPool     = 1;
+
+    std::string queueDriver     = "database";
+    std::string queueName       = "default";
+    int         queueRetryAfter = 90;
+
+    std::string corsOrigins     = "*";
+    bool        corsCredentials = false;
+    int         rateLimit       = 120;
+
+    static auto rules() {
+        return syrax::rules(
+            syrax::field(&Config::dbEngine).oneOf({"postgres", "mysql", "sqlite"}),
+            syrax::field(&Config::queueDriver).oneOf({"database", "redis"}),
+            syrax::field(&Config::apiBase).notEmpty(),
+            syrax::field(&Config::dbName).notEmpty(),
+            syrax::field(&Config::dbPool).range(1, 64),
+            syrax::field(&Config::redisPool).range(1, 64),
+            syrax::field(&Config::rateLimit).range(1, 1000000),
+            syrax::field(&Config::queueRetryAfter).range(1, 86400));
+    }
+};
+
+// La configuracion del proceso. La primera llamada lee el entorno y valida;
+// si algo no cuadra, lanza con el nombre de la variable y el valor que traia.
+const Config& config();
+
+}  // namespace bootstrap
+)T";
+
+inline constexpr std::string_view kBootstrapConfigCpp = R"T(#include "bootstrap/config.hpp"
+
+namespace bootstrap {
+
+const Config& config() {
+    static const Config value = syrax::config::load<Config>();
+    return value;
 }
 
 }  // namespace bootstrap
@@ -394,23 +561,25 @@ void database();
 
 inline constexpr std::string_view kBootstrapDatabaseCpp = R"T(#include "bootstrap/database.hpp"
 
-#include <syrax/syrax.hpp>
+#include "bootstrap/config.hpp"
 
 #include <cstddef>
 
 namespace bootstrap {
 
 void database() {
+    const auto& cfg = config();
+
     syrax::db::connect({
-        .engine      = syrax::env("DB_ENGINE", "@DBENGINE@"),
-        .host        = syrax::env("DB_HOST", "127.0.0.1"),
-        .port        = static_cast<unsigned short>(syrax::envInt("DB_PORT", 0)),
-        .database    = syrax::env("DB_NAME", "@NAME@"),
-        .username    = syrax::env("DB_USER", "@DBUSER@"),
-        .password    = syrax::env("DB_PASSWORD", "@DBUSER@"),
-        .file        = syrax::env("DB_FILE", "app.db"),
-        .charset     = syrax::env("DB_CHARSET", ""),
-        .connections = static_cast<std::size_t>(syrax::envInt("DB_POOL", 4)),
+        .engine      = cfg.dbEngine,
+        .host        = cfg.dbHost,
+        .port        = cfg.dbPort,
+        .database    = cfg.dbName,
+        .username    = cfg.dbUser,
+        .password    = cfg.dbPassword,
+        .file        = cfg.dbFile,
+        .charset     = cfg.dbCharset,
+        .connections = static_cast<std::size_t>(cfg.dbPool),
     });
 }
 
@@ -428,21 +597,22 @@ void cache();
 
 inline constexpr std::string_view kBootstrapCacheCpp = R"T(#include "bootstrap/cache.hpp"
 
-#include <syrax/syrax.hpp>
+#include "bootstrap/config.hpp"
 
 #include <cstddef>
 
 namespace bootstrap {
 
 void cache() {
-    if (!syrax::envBool("CACHE_ENABLED", false)) return;
+    const auto& cfg = config();
+    if (!cfg.cacheEnabled) return;
 
     syrax::cache::connect({
-        .host        = syrax::env("REDIS_HOST", "127.0.0.1"),
-        .port        = static_cast<unsigned short>(syrax::envInt("REDIS_PORT", 6379)),
-        .password    = syrax::env("REDIS_PASSWORD", ""),
-        .database    = static_cast<unsigned int>(syrax::envInt("REDIS_DB", 0)),
-        .connections = static_cast<std::size_t>(syrax::envInt("REDIS_POOL", 1)),
+        .host        = cfg.redisHost,
+        .port        = cfg.redisPort,
+        .password    = cfg.redisPassword,
+        .database    = static_cast<unsigned int>(cfg.redisDb),
+        .connections = static_cast<std::size_t>(cfg.redisPool),
     });
 }
 
@@ -785,21 +955,23 @@ void middleware(syrax::App& app);
 
 inline constexpr std::string_view kBootstrapMiddlewareCpp = R"T(#include "bootstrap/middleware.hpp"
 
-#include <syrax/syrax.hpp>
+#include "bootstrap/config.hpp"
 
 #include <chrono>
 
 namespace bootstrap {
 
 void middleware(syrax::App& app) {
+    const auto& cfg = config();
+
     app.cors({
-        .origins     = {syrax::env("CORS_ORIGINS", "*")},
-        .credentials = syrax::envBool("CORS_CREDENTIALS", false),
+        .origins     = {cfg.corsOrigins},
+        .credentials = cfg.corsCredentials,
     });
 
     app.useOnResponse(syrax::securityHeaders());
 
-    app.use(syrax::rateLimit(syrax::envInt("RATE_LIMIT", 120), std::chrono::minutes{1}));
+    app.use(syrax::rateLimit(cfg.rateLimit, std::chrono::minutes{1}));
 }
 
 }  // namespace bootstrap
@@ -853,30 +1025,31 @@ void queue();
 
 inline constexpr std::string_view kBootstrapQueueCpp = R"T(#include "bootstrap/queue.hpp"
 
+#include "bootstrap/config.hpp"
 #include "jobs/SendWelcome.hpp"
-
-#include <syrax/syrax.hpp>
 
 #include <chrono>
 
 namespace bootstrap {
 
 void queue() {
-    if (syrax::env("QUEUE_DRIVER", "database") == "redis") {
+    const auto& cfg = config();
+
+    if (cfg.queueDriver == "redis") {
         syrax::cache::connect({
-            .host     = syrax::env("REDIS_HOST", "127.0.0.1"),
-            .port     = static_cast<unsigned short>(syrax::envInt("REDIS_PORT", 6379)),
-            .password = syrax::env("REDIS_PASSWORD", ""),
-            .database = static_cast<unsigned int>(syrax::envInt("REDIS_DB", 0)),
+            .host     = cfg.redisHost,
+            .port     = cfg.redisPort,
+            .password = cfg.redisPassword,
+            .database = static_cast<unsigned int>(cfg.redisDb),
             .timeout  = 5.0,
             .name     = "queue",
         });
     }
 
     syrax::jobs::connect({
-        .driver     = syrax::env("QUEUE_DRIVER", "database"),
-        .queue      = syrax::env("QUEUE_NAME", "default"),
-        .retryAfter = std::chrono::seconds{syrax::envInt("QUEUE_RETRY_AFTER", 90)},
+        .driver     = cfg.queueDriver,
+        .queue      = cfg.queueName,
+        .retryAfter = std::chrono::seconds{cfg.queueRetryAfter},
     });
 
     syrax::jobs::handle<SendWelcome>();
@@ -1588,19 +1761,16 @@ inline constexpr std::string_view kRoutesCpp = R"T(#include "routes/routes.hpp"
 
 #include "routes/v1.hpp"
 
-// Con nombre, no anonimo: Glaze no refleja un tipo sin enlace.
-namespace health {
-
-struct Status {
-    std::string status;
-};
-
-}  // namespace health
-
 void registerRoutes(syrax::App& app) {
-    app.get("/health", []() -> syrax::Result<health::Status> {
-        return health::Status{.status = "ok"};
-    });
+    // Pregunta a cada base y cada Redis registrados: 200 si responden, 503 si
+    // no. Un 200 fijo haria que el healthcheck de docker diera por sano un
+    // contenedor cuya base esta caida, que es justo cuando hay que sacarlo de
+    // la rotacion. Para agregar una comprobacion propia:
+    //
+    //   syrax::health::probe("s3", []() -> syrax::Task<std::string> {
+    //       co_return co_await alcanzable() ? "" : "no responde";
+    //   });
+    app.health();
 
     routes::v1::register_(app.api());
 }
@@ -1979,7 +2149,9 @@ inline constexpr File kProjectFiles[] = {
     {"database/seeders/001_users.sql",           kSeederSqlite,      Engine::Sqlite},
     {"database/factories/UserFactory.hpp",       kUserFactory},
     {"tests/CMakeLists.txt",                     kTestsCMake},
+    {"tests/api.hpp",                            kTestApi},
     {"tests/user_test.cpp",                      kTestUser},
+    {"tests/users_api_test.cpp",                 kTestUsersApi},
 
     {"docker/Dockerfile",                        kDockerfile},
     {".dockerignore",                            kDockerignore},
@@ -1990,6 +2162,8 @@ inline constexpr File kProjectFiles[] = {
     {"src/main.cpp",                             kMain},
     {"src/bootstrap/app.hpp",                    kBootstrapH},
     {"src/bootstrap/app.cpp",                    kBootstrapCpp},
+    {"src/bootstrap/config.hpp",                 kBootstrapConfigH},
+    {"src/bootstrap/config.cpp",                 kBootstrapConfigCpp},
     {"src/bootstrap/database.hpp",               kBootstrapDatabaseH},
     {"src/bootstrap/database.cpp",               kBootstrapDatabaseCpp},
     {"src/bootstrap/errors.hpp",                 kBootstrapErrorsH},

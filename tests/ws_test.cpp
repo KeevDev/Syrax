@@ -16,7 +16,7 @@
 #include <thread>
 #include <vector>
 
-using testsrv::kPort;
+using testsrv::port;
 using Fixture = testsrv::Server;
 
 namespace {
@@ -52,7 +52,7 @@ struct Client {
 
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
-        addr.sin_port   = htons(kPort);
+        addr.sin_port   = htons(port());
         ::inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
 
         if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) return false;

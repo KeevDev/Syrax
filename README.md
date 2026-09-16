@@ -498,7 +498,7 @@ config/app.json           ajustes del servidor (versionado)
 .env.example              las mismas claves, sin valores (SI versionado)
 docker/Dockerfile         imagen multi-etapa
 docker-compose.yml        postgres, si elegiste ese motor
-public/                   estaticos, con una portada que lee tu propio /openapi.json
+public/                   estaticos, con una portada de bienvenida
 logs/
 
 database/
@@ -513,7 +513,7 @@ src/
 ├── bootstrap/            preparacion de la app
 ├── routes/               el mapa de la API, versionable
 │   ├── routes.cpp        /health y el alta de cada version
-│   └── v1.cpp            rutas de /api/v1
+│   └── v1.cpp            una linea por endpoint: ruta -> metodo del controlador
 ├── http/                 TODO lo atado al transporte
 │   ├── controllers/User/
 │   ├── requests/User/
@@ -526,6 +526,23 @@ tests/
 ├── CMakeLists.txt        Catch2, solo cuando corres `syrax test`
 └── user_test.cpp         un test de verdad, para copiar y seguir
 ```
+
+**Por qué la ruta no vive en el controlador:** `routes/v1.cpp` se lee de un vistazo y dice qué expone esta versión de la API; el controlador dice qué hace cada acción. Un handler es una función normal, así que la ruta lo nombra y ya:
+
+```cpp
+app.get(base + "/users/{id}", user::show);   // routes/v1.cpp
+```
+
+```cpp
+Task<Result<UserResource>> show(std::int64_t id) {   // el controlador
+    const auto user = co_await service::byId(id);
+    if (!user) co_return NotFound("user not found");
+
+    co_return resources::from(*user);
+}
+```
+
+Syrax deduce de esa firma el path param, el body a parsear y el esquema que documenta, igual que con una lambda. Cambiar la URL o versionar la API no toca el controlador.
 
 **Por qué existe `http/`:** marca un límite real. Si mañana expones la misma lógica por gRPC, esa carpeta se tira entera y `services/`, `repositories/` y `models/` siguen sirviendo sin tocarse.
 

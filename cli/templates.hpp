@@ -277,145 +277,179 @@ inline constexpr std::string_view kPublicIndex = R"T(<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>@NAME@</title>
+<title>@NAME@ — Syrax</title>
 <style>
 :root {
   color-scheme: light dark;
-  --fondo:   #fbfbfa;  --panel:  #ffffff;  --borde: #e6e4e0;
-  --texto:   #1a1a18;  --tenue:  #6b6862;  --acento: #b4512f;
-  --codigo:  #f4f2ef;
-  --get: #2f6f4f; --post: #2b5d94; --put: #8a6320; --delete: #97352a;
+  /* Los colores con los que GCC imprime un diagnostico: el error en rojo,
+     el caret en verde, la nota en cian. La paleta sale del compilador. */
+  --papel:  #f3f4f7;  --panel:  #ffffff;  --linea: #dfe1e8;
+  --tinta:  #14161c;  --gris:   #666c7a;
+  --error:  #c62828;  --caret:  #2e7d32;  --nota:  #0f6f86;
+  --sombra: 0 1px 2px rgba(20, 22, 28, .05);
+  --mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --fondo: #161614; --panel: #1e1e1b; --borde: #2f2e2a;
-    --texto: #ebe9e4; --tenue: #9a968e; --acento: #e0805c;
-    --codigo: #24241f;
-    --get: #7fc4a0; --post: #8fb8e8; --put: #d9b070; --delete: #e8907f;
+    --papel: #101218; --panel: #171a22; --linea: #272b36;
+    --tinta: #e8eaf0; --gris:  #9aa1b1;
+    --error: #ef6b62; --caret: #78c47e; --nota:  #5cc0da;
+    --sombra: none;
   }
 }
 * { box-sizing: border-box; }
 body {
-  margin: 0; background: var(--fondo); color: var(--texto);
-  font: 15px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  margin: 0; background: var(--papel); color: var(--tinta);
+  font: 15px/1.65 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
-.envoltura { max-width: 860px; margin: 0 auto; padding: 56px 24px 80px; }
-header { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
-h1 { margin: 0; font-size: 30px; letter-spacing: -0.02em; }
-.estado {
-  display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--tenue);
+.hoja { max-width: 780px; margin: 0 auto; padding: 64px 24px 96px; }
+a { color: var(--nota); }
+a:focus-visible, .enlace:focus-visible { outline: 2px solid var(--nota); outline-offset: 3px; }
+
+/* ---- cabecera ---- */
+.prompt { font: 12px/1 var(--mono); color: var(--gris); margin-bottom: 26px; }
+.prompt b { color: var(--caret); font-weight: 500; }
+.marca {
+  font: 600 46px/1 var(--mono); letter-spacing: -0.045em; margin: 0;
 }
-.punto { width: 8px; height: 8px; border-radius: 50%; background: var(--tenue); }
-.punto.viva { background: var(--get); }
-.punto.muerta { background: var(--delete); }
-.entradilla { color: var(--tenue); margin: 10px 0 40px; max-width: 60ch; }
-h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em;
-     color: var(--tenue); margin: 40px 0 14px; font-weight: 600; }
-.rutas { border: 1px solid var(--borde); border-radius: 10px; overflow: hidden;
-         background: var(--panel); }
-.ruta { display: flex; align-items: center; gap: 14px; padding: 11px 16px;
-        border-bottom: 1px solid var(--borde); }
-.ruta:last-child { border-bottom: none; }
-.metodo { font: 600 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
-          letter-spacing: 0.06em; min-width: 52px; }
-.get { color: var(--get); } .post { color: var(--post); }
-.put { color: var(--put); } .patch { color: var(--put); } .delete { color: var(--delete); }
-.camino { font: 13px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
-.vacio { padding: 16px; color: var(--tenue); font-size: 14px; }
-.tarjetas { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
-a.tarjeta {
-  display: block; padding: 16px; border: 1px solid var(--borde); border-radius: 10px;
-  background: var(--panel); text-decoration: none; color: inherit;
-  transition: border-color .15s ease, transform .15s ease;
+.tesis { color: var(--gris); margin: 12px 0 0; max-width: 46ch; font-size: 16px; }
+
+/* ---- el diagnostico: la pieza central ---- */
+.diagnostico {
+  margin: 38px 0 12px; padding: 22px 24px; background: var(--panel);
+  border: 1px solid var(--linea); border-left: 3px solid var(--error);
+  border-radius: 4px; box-shadow: var(--sombra);
+  font: 13px/1.85 var(--mono); overflow-x: auto;
 }
-a.tarjeta:hover { border-color: var(--acento); transform: translateY(-1px); }
-a.tarjeta strong { display: block; margin-bottom: 4px; }
-a.tarjeta span { color: var(--tenue); font-size: 13px; }
-pre { background: var(--codigo); border: 1px solid var(--borde); border-radius: 10px;
-      padding: 16px; overflow-x: auto; margin: 0;
-      font: 13px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; }
-pre .c { color: var(--tenue); }
-footer { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--borde);
-         color: var(--tenue); font-size: 13px; }
-footer a { color: var(--acento); }
+.diagnostico .codigo { white-space: pre; }
+.diagnostico .mal { color: var(--error); }
+.subraya {
+  display: block; color: var(--caret); white-space: pre;
+  animation: crece .5s .35s steps(12, end) both;
+}
+@keyframes crece { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0 0 0 0); } }
+.veredicto { margin-top: 12px; color: var(--error); white-space: pre-wrap; }
+.veredicto .sug { color: var(--caret); }
+@media (prefers-reduced-motion: reduce) { .subraya { animation: none; } }
+
+.pie-diagnostico { color: var(--gris); font-size: 14px; margin: 0 0 56px; max-width: 54ch; }
+
+/* ---- secciones ---- */
+h2 {
+  font: 600 12px/1 var(--mono); letter-spacing: .14em; text-transform: uppercase;
+  color: var(--gris); margin: 0 0 16px;
+}
+section { margin-bottom: 52px; }
+pre {
+  margin: 0; padding: 20px 22px; background: var(--panel); border: 1px solid var(--linea);
+  border-radius: 4px; overflow-x: auto; font: 13px/1.8 var(--mono); box-shadow: var(--sombra);
+}
+pre .c { color: var(--gris); }
+pre .k { color: var(--nota); }
+
+/* lo que escribes / lo que no */
+.cuentas { display: flex; gap: 28px; flex-wrap: wrap; align-items: flex-end; margin-top: 18px; }
+.cuenta { flex: 1 1 200px; }
+.cifra { font: 600 34px/1 var(--mono); letter-spacing: -.03em; display: block; }
+.cifra.propia { color: var(--caret); }
+.cifra.ajena  { color: var(--gris); text-decoration: line-through; text-decoration-thickness: 1px; }
+.cuenta span.que { display: block; color: var(--gris); font-size: 13px; margin-top: 6px; }
+
+.hace { list-style: none; padding: 0; margin: 16px 0 0; }
+.hace li {
+  padding: 9px 0 9px 22px; border-top: 1px solid var(--linea); position: relative;
+  font-size: 14px; color: var(--gris);
+}
+.hace li::before {
+  content: "->"; position: absolute; left: 0; color: var(--caret);
+  font: 12px/1.9 var(--mono);
+}
+.hace li b { color: var(--tinta); font-weight: 500; }
+
+.enlaces { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.enlace {
+  display: block; padding: 15px 16px; background: var(--panel); border: 1px solid var(--linea);
+  border-radius: 4px; text-decoration: none; color: inherit; box-shadow: var(--sombra);
+  transition: border-color .15s ease;
+}
+.enlace:hover { border-color: var(--nota); }
+.enlace b { display: block; font: 600 13px/1.4 var(--mono); }
+.enlace span { color: var(--gris); font-size: 13px; }
+
+footer { border-top: 1px solid var(--linea); padding-top: 18px; color: var(--gris); font-size: 13px; }
 </style>
 </head>
 <body>
-<div class="envoltura">
+<div class="hoja">
 
-  <header>
-    <h1>@NAME@</h1>
-    <span class="estado"><span class="punto" id="punto"></span><span id="salud">comprobando...</span></span>
-  </header>
+  <p class="prompt">~/@NAME@ <b>$</b> syrax serve</p>
+  <h1 class="marca">syrax</h1>
+  <p class="tesis">Un framework de APIs para C++ moderno donde el compilador es la red de seguridad.</p>
 
-  <p class="entradilla">
-    Esta pagina sale de <code>public/index.html</code>. Editala o borrala: no la sirve
-    el framework, es un archivo estatico mas.
+  <div class="diagnostico">
+    <div class="codigo">co_await Query&lt;User&gt;().where(&amp;User::<span class="mal">emial</span>, "=", email);
+<span class="subraya">                                    ^~~~~</span></div>
+    <div class="veredicto">error: 'emial' is not a member of 'User'<span class="sug">; did you mean 'email'?</span></div>
+  </div>
+  <p class="pie-diagnostico">
+    El nombre de una columna es un puntero a miembro, no un string. La errata no
+    llega a produccion porque no llega ni a compilar. Lo mismo vale para el body
+    de una peticion, el esquema del OpenAPI y la forma de una fila.
   </p>
 
-  <h2>Rutas</h2>
-  <div class="rutas" id="rutas"><div class="vacio">leyendo /openapi.json...</div></div>
+  <section>
+    <h2>Una firma, y el resto sale solo</h2>
+    <pre><span class="k">app</span>.post("/users", [](requests::CreateUser body)
+        -&gt; Task&lt;Result&lt;UserResource&gt;&gt; {
+    <span class="c">// el body ya llego parseado y validado</span>
+    co_return resources::from(co_await service::create(body));
+});</pre>
+    <ul class="hace">
+      <li><b>Parsea</b> el JSON en tu struct, por reflexion, sin macros</li>
+      <li><b>Valida</b> las reglas del tipo y responde 422 con detalle por campo</li>
+      <li><b>Serializa</b> la respuesta y fija el codigo de estado</li>
+      <li><b>Documenta</b> la ruta en /docs sin que anotes nada</li>
+    </ul>
+  </section>
 
-  <h2>A donde ir</h2>
-  <div class="tarjetas">
-    <a class="tarjeta" href="/docs"><strong>Swagger UI</strong><span>probar los endpoints a mano</span></a>
-    <a class="tarjeta" href="/openapi.json"><strong>openapi.json</strong><span>el contrato, para generar clientes</span></a>
-    <a class="tarjeta" href="/health"><strong>/health</strong><span>lo que mira tu orquestador</span></a>
-  </div>
+  <section>
+    <h2>Un modelo son quince lineas</h2>
+    <div class="cuentas">
+      <div class="cuenta">
+        <span class="cifra propia">15</span>
+        <span class="que">el struct que escribes tu</span>
+      </div>
+      <div class="cuenta">
+        <span class="cifra ajena">1.632</span>
+        <span class="que">las que genera un ORM para la misma tabla de 6 columnas</span>
+      </div>
+    </div>
+  </section>
 
-  <h2>Siguientes pasos</h2>
-  <pre><span class="c"># las tablas</span>
-syrax migrate
+  <section>
+    <h2>A donde ir</h2>
+    <div class="enlaces">
+      <a class="enlace" href="/docs"><b>/docs</b><span>tu API, endpoint por endpoint</span></a>
+      <a class="enlace" href="/openapi.json"><b>/openapi.json</b><span>el contrato, para generar clientes</span></a>
+      <a class="enlace" href="https://github.com/KeevDev/Syrax"><b>github</b><span>el README completo del framework</span></a>
+    </div>
+  </section>
 
-<span class="c"># datos de ejemplo</span>
-syrax db:seed
-
-<span class="c"># los tests que ya trae tests/</span>
-syrax test
-
-<span class="c"># y mientras editas, esto recompila solo al guardar</span>
-syrax serve</pre>
+  <section>
+    <h2>Mientras tanto</h2>
+    <pre>syrax migrate      <span class="c"># crea las tablas</span>
+syrax db:seed      <span class="c"># datos de ejemplo</span>
+syrax test         <span class="c"># los tests que ya trae tests/</span>
+syrax serve        <span class="c"># recompila solo al guardar</span></pre>
+  </section>
 
   <footer>
-    Construido con <a href="https://github.com/KeevDev/Syrax">Syrax</a>.
+    Esta pagina es <code>public/index.html</code>. No la sirve el framework: es un
+    archivo estatico tuyo. Editala, o borrala.
   </footer>
 
 </div>
-
-<script>
-const chip = m => '<span class="metodo ' + m + '">' + m.toUpperCase() + '</span>';
-
-fetch('/openapi.json')
-  .then(r => r.ok ? r.json() : Promise.reject())
-  .then(doc => {
-    const filas = [];
-    for (const [camino, metodos] of Object.entries(doc.paths || {})) {
-      for (const metodo of Object.keys(metodos)) {
-        filas.push({ camino, metodo });
-      }
-    }
-    filas.sort((a, b) => a.camino.localeCompare(b.camino) || a.metodo.localeCompare(b.metodo));
-
-    document.getElementById('rutas').innerHTML = filas.length
-      ? filas.map(f => '<div class="ruta">' + chip(f.metodo) +
-                       '<span class="camino">' + f.camino + '</span></div>').join('')
-      : '<div class="vacio">Ninguna ruta registrada todavia.</div>';
-  })
-  .catch(() => {
-    document.getElementById('rutas').innerHTML =
-      '<div class="vacio">No pude leer /openapi.json. Si llamaste a withoutDocs(), es lo esperado.</div>';
-  });
-
-fetch('/health')
-  .then(r => {
-    document.getElementById('punto').className = 'punto ' + (r.ok ? 'viva' : 'muerta');
-    document.getElementById('salud').textContent = r.ok ? 'respondiendo' : 'con problemas';
-  })
-  .catch(() => {
-    document.getElementById('punto').className = 'punto muerta';
-    document.getElementById('salud').textContent = 'sin respuesta';
-  });
-</script>
 </body>
 </html>
 )T";
@@ -686,11 +720,23 @@ inline constexpr std::string_view kRoutesV1Cpp = R"T(#include "routes/v1.hpp"
 
 #include "http/controllers/User/UserController.hpp"
 
+#include <string>
+
 namespace routes::v1 {
 
-void register_(syrax::App& app) {
-    controllers::user::routes(app, kPrefix);
+namespace user = controllers::UserController;
 
+// El mapa de la API: una linea por endpoint, y a la derecha quien lo atiende.
+// Se lee de un vistazo que expone esta version, sin abrir ningun controlador.
+void register_(syrax::App& app) {
+    const std::string base{kPrefix};
+
+    app.get(base + "/users", user::index);
+    app.post(base + "/users", user::store);
+
+    app.get(base + "/users/{id}", user::show);
+    app.put(base + "/users/{id}", user::update);
+    app.del(base + "/users/{id}", user::destroy);
 }
 
 }  // namespace routes::v1
@@ -994,71 +1040,79 @@ inline constexpr std::string_view kControllerUserH = R"T(#pragma once
 
 #include <syrax/syrax.hpp>
 
-#include <string_view>
+#include "http/requests/User/UserRequests.hpp"
+#include "http/resources/User/UserResource.hpp"
 
-namespace controllers::user {
+#include <cstdint>
+#include <vector>
 
-void routes(syrax::App& app, std::string_view prefix);
+namespace controllers::UserController {
 
-}  // namespace controllers::user
+// Un handler por accion, con la firma que declara lo que necesita: Syrax
+// deduce de ahi el path param, el body a parsear y el esquema que documenta.
+//
+// Que ruta lleva a cada uno esta en routes/v1.cpp. Aqui esta el que hacer,
+// no el donde: cambiar la URL o la version de la API no toca este archivo.
+syrax::Task<syrax::Result<std::vector<resources::UserResource>>> index();
+
+syrax::Task<syrax::Result<resources::UserResource>> show(std::int64_t id);
+
+syrax::Task<syrax::Result<resources::UserResource>> store(requests::CreateUser body);
+
+syrax::Task<syrax::Result<resources::UserResource>> update(std::int64_t id,
+                                                           requests::UpdateUser body);
+
+syrax::Task<syrax::Result<resources::DeletedResource>> destroy(std::int64_t id);
+
+}  // namespace controllers::UserController
 )T";
 
 inline constexpr std::string_view kControllerUserCpp = R"T(#include "http/controllers/User/UserController.hpp"
 
-#include "http/requests/User/UserRequests.hpp"
-#include "http/resources/User/UserResource.hpp"
 #include "services/User/UserService.hpp"
-
-#include <cstdint>
-#include <string>
-#include <string_view>
-#include <vector>
 
 using namespace syrax;
 
-namespace controllers::user {
+namespace controllers::UserController {
 
 namespace service = services::UserService;
 
-void routes(App& app, std::string_view prefix) {
-    const std::string base{prefix};
+// El controlador traduce entre HTTP y el dominio, y nada mas: entra un id o
+// un body ya validado, sale un resource o un Error. La regla de negocio esta
+// en el service; el SQL, mas abajo.
 
-    app.get(base + "/users", []() -> Task<Result<std::vector<resources::UserResource>>> {
-        co_return resources::from(co_await service::list());
-    });
-
-    app.get(base + "/users/{id}", [](std::int64_t id) -> Task<Result<resources::UserResource>> {
-        const auto user = co_await service::byId(id);
-        if (!user) co_return NotFound("user not found");
-
-        co_return resources::from(*user);
-    });
-
-    app.post(base + "/users", [](requests::CreateUser body)
-                 -> Task<Result<resources::UserResource>> {
-        const auto user = co_await service::create(std::move(body));
-        if (!user) co_return Conflict("email already registered");
-
-        co_return resources::from(*user);
-    });
-
-    app.put(base + "/users/{id}", [](std::int64_t id, requests::UpdateUser body)
-                 -> Task<Result<resources::UserResource>> {
-        const auto user = co_await service::update(id, std::move(body));
-        if (!user) co_return NotFound("user not found");
-
-        co_return resources::from(*user);
-    });
-
-    app.del(base + "/users/{id}", [](std::int64_t id)
-                -> Task<Result<resources::DeletedResource>> {
-        if (!co_await service::remove(id)) co_return NotFound("user not found");
-
-        co_return resources::DeletedResource{.id = id, .deleted = true};
-    });
+Task<Result<std::vector<resources::UserResource>>> index() {
+    co_return resources::from(co_await service::list());
 }
 
-}  // namespace controllers::user
+Task<Result<resources::UserResource>> show(std::int64_t id) {
+    const auto user = co_await service::byId(id);
+    if (!user) co_return NotFound("user not found");
+
+    co_return resources::from(*user);
+}
+
+Task<Result<resources::UserResource>> store(requests::CreateUser body) {
+    const auto user = co_await service::create(std::move(body));
+    if (!user) co_return Conflict("email already registered");
+
+    co_return resources::from(*user);
+}
+
+Task<Result<resources::UserResource>> update(std::int64_t id, requests::UpdateUser body) {
+    const auto user = co_await service::update(id, std::move(body));
+    if (!user) co_return NotFound("user not found");
+
+    co_return resources::from(*user);
+}
+
+Task<Result<resources::DeletedResource>> destroy(std::int64_t id) {
+    if (!co_await service::remove(id)) co_return NotFound("user not found");
+
+    co_return resources::DeletedResource{.id = id, .deleted = true};
+}
+
+}  // namespace controllers::UserController
 )T";
 
 // ================================================================ indice

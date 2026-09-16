@@ -15,7 +15,26 @@
 
 namespace syrax {
 
-enum class Dialect { Postgres, Sqlite };
+// Dialect vive en db.hpp: es el mismo que usa el query builder.
+
+namespace detail {
+
+// Como se escribe un identificador. MySQL reserva las comillas dobles para
+// texto, asi que ahi se usan acentos graves; los otros dos siguen el estandar.
+inline std::string quote(const std::string& name, Dialect dialect) {
+    return dialect == Dialect::Mysql ? "`" + name + "`" : "\"" + name + "\"";
+}
+
+// MySQL no acepta IF NOT EXISTS al crear un indice ni IF EXISTS al borrarlo.
+inline std::string ifNotExists(Dialect dialect) {
+    return dialect == Dialect::Mysql ? "" : "IF NOT EXISTS ";
+}
+
+inline std::string ifExists(Dialect dialect) {
+    return dialect == Dialect::Mysql ? "" : "IF EXISTS ";
+}
+
+}  // namespace detail
 
 // ---------------------------------------------------------------- Column
 
@@ -23,10 +42,20 @@ enum class Dialect { Postgres, Sqlite };
 // encadenar: t.string("email").unique().nullable().
 class Column {
 public:
-    Column(std::string name, std::string pgType, std::string sqliteType)
+    Column(std::string name, std::string pgType, std::string mysqlType, std::string sqliteType)
         : name_{std::move(name)},
           pgType_{std::move(pgType)},
+          mysqlType_{std::move(mysqlType)},
           sqliteType_{std::move(sqliteType)} {}
+
+    const std::string& type(Dialect dialect) const {
+        switch (dialect) {
+            case Dialect::Postgres: return pgType_;
+            case Dialect::Mysql:    return mysqlType_;
+            case Dialect::Sqlite:   return sqliteType_;
+        }
+        return pgType_;
+    }
 
     Column& nullable(bool v = true) { nullable_ = v; return *this; }
     Column& unique(bool v = true)   { unique_ = v;   return *this; }
@@ -68,7 +97,7 @@ public:
     // Postgres necesita una por aspecto: tipo, nulabilidad y default no se
     // pueden cambiar en un solo ALTER COLUMN.
     std::vector<std::string> alterStatements(const std::string& table, Dialect dialect) const {
-        if (dialect != Dialect::Postgres) {
+        if (dialect == Dialect::Sqlite) {
             throw std::logic_error(
                 "syrax: sqlite no soporta ALTER COLUMN. Para cambiar el tipo o las "
                 "restricciones de '" + name_ + "' en '" + table +
@@ -76,28 +105,48 @@ public:
                 "con Schema::raw(). Es una limitacion del motor, no de syrax.");
         }
 
-        const std::string prefix = "ALTER TABLE \"" + table + "\" ALTER COLUMN \"" + name_ + "\" ";
+        const std::string tabla   = detail::quote(table, dialect);
+        const std::string columna = detail::quote(name_, dialect);
+
         std::vector<std::string> out;
 
-        std::string type = prefix + "TYPE " + pgType_;
-        if (!using_.empty()) type += " USING " + using_;
-        out.push_back(std::move(type));
+        if (dialect == Dialect::Mysql) {
+            // MySQL redefine la columna entera de una vez: el tipo, la
+            // nulabilidad y el default van en la misma sentencia.
+            std::string modify = "ALTER TABLE " + tabla + " MODIFY COLUMN " + columna + " " +
+                                 mysqlType_ + (nullable_ ? " NULL" : " NOT NULL");
+            if (!default_.empty()) modify += " DEFAULT " + default_;
+            out.push_back(std::move(modify));
 
-        out.push_back(prefix + (nullable_ ? "DROP NOT NULL" : "SET NOT NULL"));
+            if (default_.empty() && dropDefault_) {
+                out.push_back("ALTER TABLE " + tabla + " ALTER COLUMN " + columna +
+                              " DROP DEFAULT");
+            }
+        } else {
+            // Postgres necesita una sentencia por aspecto: tipo, nulabilidad y
+            // default no se pueden cambiar en un solo ALTER COLUMN.
+            const std::string prefix = "ALTER TABLE " + tabla + " ALTER COLUMN " + columna + " ";
 
-        if (!default_.empty())  out.push_back(prefix + "SET DEFAULT " + default_);
-        else if (dropDefault_)  out.push_back(prefix + "DROP DEFAULT");
+            std::string type = prefix + "TYPE " + pgType_;
+            if (!using_.empty()) type += " USING " + using_;
+            out.push_back(std::move(type));
+
+            out.push_back(prefix + (nullable_ ? "DROP NOT NULL" : "SET NOT NULL"));
+
+            if (!default_.empty())  out.push_back(prefix + "SET DEFAULT " + default_);
+            else if (dropDefault_)  out.push_back(prefix + "DROP DEFAULT");
+        }
 
         if (unique_) {
-            out.push_back("ALTER TABLE \"" + table + "\" ADD CONSTRAINT \"uq_" + table + "_" +
-                          name_ + "\" UNIQUE (\"" + name_ + "\")");
+            out.push_back("ALTER TABLE " + tabla + " ADD CONSTRAINT " +
+                          detail::quote("uq_" + table + "_" + name_, dialect) + " UNIQUE (" +
+                          columna + ")");
         }
         return out;
     }
 
     std::string definition(Dialect dialect) const {
-        std::string sql = "\"" + name_ + "\" " +
-                          (dialect == Dialect::Postgres ? pgType_ : sqliteType_);
+        std::string sql = detail::quote(name_, dialect) + " " + type(dialect);
 
         if (primary_)  sql += " PRIMARY KEY";
         if (!nullable_ && !primary_) sql += " NOT NULL";
@@ -105,14 +154,15 @@ public:
         if (!default_.empty())       sql += " DEFAULT " + default_;
 
         if (!refTable_.empty()) {
-            sql += " REFERENCES \"" + refTable_ + "\"(\"" + refColumn_ + "\")";
+            sql += " REFERENCES " + detail::quote(refTable_, dialect) + "(" +
+                   detail::quote(refColumn_, dialect) + ")";
             if (!onDelete_.empty()) sql += " ON DELETE " + onDelete_;
         }
         return sql;
     }
 
 private:
-    std::string name_, pgType_, sqliteType_;
+    std::string name_, pgType_, mysqlType_, sqliteType_;
     std::string default_, refTable_, refColumn_, onDelete_;
     std::string using_;
     bool        nullable_    = false;
@@ -132,31 +182,35 @@ public:
     explicit Blueprint(std::string table) : table_{std::move(table)} {}
 
     Column& id(std::string name = "id") {
-        return add({std::move(name), "BIGSERIAL", "INTEGER"}).primary();
+        return add({std::move(name), "BIGSERIAL", "BIGINT AUTO_INCREMENT", "INTEGER"}).primary();
     }
     Column& string(std::string name, int length = 255) {
-        return add({std::move(name), "VARCHAR(" + std::to_string(length) + ")", "TEXT"});
+        const auto varchar = "VARCHAR(" + std::to_string(length) + ")";
+        return add({std::move(name), varchar, varchar, "TEXT"});
     }
-    Column& text(std::string name)        { return add({std::move(name), "TEXT", "TEXT"}); }
-    Column& integer(std::string name)     { return add({std::move(name), "INTEGER", "INTEGER"}); }
-    Column& bigInteger(std::string name)  { return add({std::move(name), "BIGINT", "INTEGER"}); }
-    Column& boolean(std::string name)     { return add({std::move(name), "BOOLEAN", "INTEGER"}); }
-    Column& decimal(std::string name)     { return add({std::move(name), "DOUBLE PRECISION", "REAL"}); }
-    Column& date(std::string name)        { return add({std::move(name), "DATE", "TEXT"}); }
-    Column& json(std::string name)        { return add({std::move(name), "JSONB", "TEXT"}); }
+    Column& text(std::string name)       { return add({std::move(name), "TEXT", "TEXT", "TEXT"}); }
+    Column& integer(std::string name)    { return add({std::move(name), "INTEGER", "INT", "INTEGER"}); }
+    Column& bigInteger(std::string name) { return add({std::move(name), "BIGINT", "BIGINT", "INTEGER"}); }
+    Column& boolean(std::string name)    { return add({std::move(name), "BOOLEAN", "TINYINT(1)", "INTEGER"}); }
+    Column& date(std::string name)       { return add({std::move(name), "DATE", "DATE", "TEXT"}); }
+    Column& json(std::string name)       { return add({std::move(name), "JSONB", "JSON", "TEXT"}); }
+
+    Column& decimal(std::string name) {
+        return add({std::move(name), "DOUBLE PRECISION", "DOUBLE", "REAL"});
+    }
 
     Column& timestamp(std::string name) {
-        return add({std::move(name), "TIMESTAMPTZ", "TEXT"});
+        return add({std::move(name), "TIMESTAMPTZ", "DATETIME", "TEXT"});
     }
 
     // created_at / updated_at con default del motor.
     void timestamps() {
-        timestamp("created_at").defaultTo(pgNow_);
-        timestamp("updated_at").defaultTo(pgNow_);
+        timestamp("created_at").defaultTo(now_);
+        timestamp("updated_at").defaultTo(now_);
     }
 
     Column& foreignId(std::string name, std::string refTable, std::string refColumn = "id") {
-        return add({std::move(name), "BIGINT", "INTEGER"})
+        return add({std::move(name), "BIGINT", "BIGINT", "INTEGER"})
             .references(std::move(refTable), std::move(refColumn));
     }
 
@@ -201,8 +255,8 @@ private:
         return columns_.back();
     }
 
-    // Ambos motores aceptan CURRENT_TIMESTAMP; now() es solo de Postgres.
-    static constexpr const char* pgNow_ = "CURRENT_TIMESTAMP";
+    // Los tres aceptan CURRENT_TIMESTAMP; now() es solo de Postgres.
+    static constexpr const char* now_ = "CURRENT_TIMESTAMP";
 
     std::string         table_;
     std::vector<Column> columns_;
@@ -227,7 +281,7 @@ public:
         Blueprint blueprint{table};
         build(blueprint);
 
-        std::string sql = "CREATE TABLE IF NOT EXISTS \"" + table + "\" (\n";
+        std::string sql = "CREATE TABLE " + detail::ifNotExists(dialect_) + name(table) + " (\n";
         for (std::size_t i = 0; i < blueprint.columns().size(); ++i) {
             sql += "    " + blueprint.columns()[i].definition(dialect_);
             if (i + 1 < blueprint.columns().size()) sql += ",";
@@ -236,17 +290,11 @@ public:
         sql += ")";
         statements_.push_back(std::move(sql));
 
-        for (const auto& column : blueprint.columns()) {
-            if (!column.hasIndex()) continue;
-
-            statements_.push_back("CREATE INDEX IF NOT EXISTS \"idx_" + table + "_" +
-                                  column.name() + "\" ON \"" + table + "\" (\"" +
-                                  column.name() + "\")");
-        }
+        addIndexes(table, blueprint);
     }
 
     void drop(const std::string& table) {
-        statements_.push_back("DROP TABLE IF EXISTS \"" + table + "\"");
+        statements_.push_back("DROP TABLE " + detail::ifExists(dialect_) + name(table));
     }
 
     // Modifica una tabla existente.
@@ -259,73 +307,73 @@ public:
     //
     // Los renames van primero para que puedas renombrar y agregar en la misma
     // migracion sin que choquen los nombres.
-    void table(const std::string& name, const std::function<void(Blueprint&)>& build) {
-        Blueprint blueprint{name};
+    void table(const std::string& table, const std::function<void(Blueprint&)>& build) {
+        Blueprint blueprint{table};
         build(blueprint);
 
+        const auto tabla = name(table);
+
         for (const auto& [from, to] : blueprint.renames()) {
-            statements_.push_back("ALTER TABLE \"" + name + "\" RENAME COLUMN \"" + from +
-                                  "\" TO \"" + to + "\"");
+            statements_.push_back("ALTER TABLE " + tabla + " RENAME COLUMN " + name(from) +
+                                  " TO " + name(to));
         }
 
         for (const auto& column : blueprint.columns()) {
             // Una columna marcada con .change() modifica la que ya existe; el
             // resto se agrega.
             if (column.isChange()) {
-                for (auto& statement : column.alterStatements(name, dialect_)) {
+                for (auto& statement : column.alterStatements(table, dialect_)) {
                     statements_.push_back(std::move(statement));
                 }
                 continue;
             }
 
-            // Agregar una columna NOT NULL a una tabla con filas falla en
-            // postgres y en sqlite si no hay DEFAULT. Se detecta aqui para dar
-            // un mensaje util en vez de un error de SQL cripto.
+            // Agregar una columna NOT NULL a una tabla con filas falla en los
+            // tres motores si no hay DEFAULT. Se detecta aqui para dar un
+            // mensaje util en vez de un error de SQL cripto.
             if (column.requiresDefaultWhenAdded()) {
                 throw std::logic_error(
-                    "syrax: la columna '" + column.name() + "' de la tabla '" + name +
+                    "syrax: la columna '" + column.name() + "' de la tabla '" + table +
                     "' es NOT NULL sin DEFAULT. Al agregarla a una tabla existente "
                     "usa .nullable() o .defaultTo(...)");
             }
 
-            statements_.push_back("ALTER TABLE \"" + name + "\" ADD COLUMN " +
+            statements_.push_back("ALTER TABLE " + tabla + " ADD COLUMN " +
                                   column.definition(dialect_));
         }
 
         for (const auto& [constraint, expression] : blueprint.checks()) {
-            statements_.push_back("ALTER TABLE \"" + name + "\" ADD CONSTRAINT \"" + constraint +
-                                  "\" CHECK (" + expression + ")");
+            statements_.push_back("ALTER TABLE " + tabla + " ADD CONSTRAINT " + name(constraint) +
+                                  " CHECK (" + expression + ")");
         }
 
         for (const auto& column : blueprint.droppedUniques()) {
-            statements_.push_back("ALTER TABLE \"" + name + "\" DROP CONSTRAINT IF EXISTS \"uq_" +
-                                  name + "_" + column + "\"");
+            dropUnique(table, "uq_" + table + "_" + column);
         }
 
         for (const auto& constraint : blueprint.droppedConstraints()) {
-            statements_.push_back("ALTER TABLE \"" + name + "\" DROP CONSTRAINT IF EXISTS \"" +
-                                  constraint + "\"");
+            dropCheck(table, constraint);
         }
 
         for (const auto& column : blueprint.drops()) {
-            statements_.push_back("ALTER TABLE \"" + name + "\" DROP COLUMN \"" + column + "\"");
+            statements_.push_back("ALTER TABLE " + tabla + " DROP COLUMN " + name(column));
         }
 
         for (const auto& column : blueprint.droppedIndexes()) {
-            statements_.push_back("DROP INDEX IF EXISTS \"idx_" + name + "_" + column + "\"");
+            const auto indice = name("idx_" + table + "_" + column);
+
+            // El indice pertenece a la tabla en MySQL y al esquema en los
+            // otros dos, asi que la sentencia no es la misma.
+            statements_.push_back(dialect_ == Dialect::Mysql
+                                      ? "DROP INDEX " + indice + " ON " + tabla
+                                      : "DROP INDEX IF EXISTS " + indice);
         }
 
-        for (const auto& column : blueprint.columns()) {
-            if (!column.hasIndex()) continue;
-
-            statements_.push_back("CREATE INDEX IF NOT EXISTS \"idx_" + name + "_" +
-                                  column.name() + "\" ON \"" + name + "\" (\"" +
-                                  column.name() + "\")");
-        }
+        addIndexes(table, blueprint);
     }
 
     void rename(const std::string& from, const std::string& to) {
-        statements_.push_back("ALTER TABLE \"" + from + "\" RENAME TO \"" + to + "\"");
+        statements_.push_back("ALTER TABLE " + name(from) + " RENAME TO " + name(to));
     }
 
     // Escape hatch: cuando el builder no alcanza, SQL crudo.
@@ -335,6 +383,36 @@ public:
     const std::vector<std::string>& statements() const { return statements_; }
 
 private:
+    std::string name(const std::string& identifier) const {
+        return detail::quote(identifier, dialect_);
+    }
+
+    void addIndexes(const std::string& table, const Blueprint& blueprint) {
+        for (const auto& column : blueprint.columns()) {
+            if (!column.hasIndex()) continue;
+
+            statements_.push_back("CREATE INDEX " + detail::ifNotExists(dialect_) +
+                                  name("idx_" + table + "_" + column.name()) + " ON " +
+                                  name(table) + " (" + name(column.name()) + ")");
+        }
+    }
+
+    // Un UNIQUE en MySQL es un indice y se quita como tal; en Postgres y en
+    // sqlite es una constraint con nombre propio.
+    void dropUnique(const std::string& table, const std::string& constraint) {
+        statements_.push_back(dialect_ == Dialect::Mysql
+                                  ? "ALTER TABLE " + name(table) + " DROP INDEX " + name(constraint)
+                                  : "ALTER TABLE " + name(table) + " DROP CONSTRAINT IF EXISTS " +
+                                        name(constraint));
+    }
+
+    void dropCheck(const std::string& table, const std::string& constraint) {
+        statements_.push_back(dialect_ == Dialect::Mysql
+                                  ? "ALTER TABLE " + name(table) + " DROP CHECK " + name(constraint)
+                                  : "ALTER TABLE " + name(table) + " DROP CONSTRAINT IF EXISTS " +
+                                        name(constraint));
+    }
+
     Dialect                  dialect_;
     std::vector<std::string> statements_;
 };
@@ -364,24 +442,33 @@ namespace syrax {
 // donde bloquear no molesta y el codigo queda mucho mas simple.
 class Migrator {
 public:
-    Migrator() {
-        db::loadDotEnv();
+    Migrator() : Migrator(loadedConnection()) {}
 
-        const auto engine = db::env("DB_ENGINE", "postgres");
-        sqlite_           = (engine == "sqlite" || engine == "sqlite3");
-        dialect_          = sqlite_ ? Dialect::Sqlite : Dialect::Postgres;
+    // La conexion se puede pasar a mano para migrar algo que no es la base
+    // por defecto: otra conexion del proyecto, o una de pruebas.
+    explicit Migrator(const db::Connection& conn) : conn_{conn} {
+        dialect_ = db::engineFromName(conn_.engine);
 
-        if (sqlite_) {
-            client_ = drogon::orm::DbClient::newSqlite3Client(
-                "filename=" + db::env("DB_FILE", "app.db"), 1);
-        } else {
-            client_ = drogon::orm::DbClient::newPgClient(
-                "host=" + db::env("DB_HOST", "127.0.0.1") +
-                    " port=" + db::env("DB_PORT", "5432") +
-                    " dbname=" + db::env("DB_NAME", "app") +
-                    " user=" + db::env("DB_USER", "postgres") +
-                    " password=" + db::env("DB_PASSWORD", "postgres"),
-                1);
+        const auto port = std::to_string(conn_.port != 0 ? conn_.port : db::defaultPort(dialect_));
+
+        switch (dialect_) {
+            case Dialect::Postgres:
+                client_ = drogon::orm::DbClient::newPgClient(
+                    "host=" + conn_.host + " port=" + port + " dbname=" + conn_.database +
+                        " user=" + conn_.username + " password=" + conn_.password,
+                    1);
+                break;
+
+            case Dialect::Mysql:
+                client_ = drogon::orm::DbClient::newMysqlClient(
+                    "host=" + conn_.host + " port=" + port + " dbname=" + conn_.database +
+                        " user=" + conn_.username + " password=" + conn_.password,
+                    1);
+                break;
+
+            case Dialect::Sqlite:
+                client_ = drogon::orm::DbClient::newSqlite3Client("filename=" + conn_.file, 1);
+                break;
         }
     }
 
@@ -472,14 +559,15 @@ private:
         } catch (const std::exception& e) {
             std::cerr << "\nerror: no pude conectar a la base de datos.\n\n";
 
-            if (sqlite_) {
-                std::cerr << "  archivo: " << db::env("DB_FILE", "app.db") << "\n";
+            if (dialect_ == Dialect::Sqlite) {
+                std::cerr << "  archivo: " << conn_.file << "\n";
             } else {
-                std::cerr << "  host:     " << db::env("DB_HOST", "127.0.0.1") << ":"
-                          << db::env("DB_PORT", "5432") << "\n"
-                          << "  base:     " << db::env("DB_NAME", "app") << "\n"
-                          << "  usuario:  " << db::env("DB_USER", "postgres") << "\n\n"
-                          << "  Revisa DB_* en tu .env. Si el puerto lo ocupa otro postgres\n"
+                std::cerr << "  motor:    " << db::engineName(dialect_) << "\n"
+                          << "  host:     " << conn_.host << ":"
+                          << (conn_.port != 0 ? conn_.port : db::defaultPort(dialect_)) << "\n"
+                          << "  base:     " << conn_.database << "\n"
+                          << "  usuario:  " << conn_.username << "\n\n"
+                          << "  Revisa DB_* en tu .env. Si el puerto lo ocupa otro servidor\n"
                           << "  (es comun tener varios locales), cambia DB_PORT y reinicia\n"
                           << "  el contenedor con: docker compose down && docker compose up -d\n";
             }
@@ -490,17 +578,31 @@ private:
     }
 
     std::string placeholder(int n) const {
-        return sqlite_ ? "?" : "$" + std::to_string(n);
+        return dialect_ == Dialect::Postgres ? "$" + std::to_string(n) : "?";
     }
 
     void ensureControlTable() {
-        client_->execSqlSync(
-            sqlite_ ? "CREATE TABLE IF NOT EXISTS syrax_migrations ("
-                      "id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, "
-                      "applied_at TEXT NOT NULL DEFAULT (datetime('now')))"
-                    : "CREATE TABLE IF NOT EXISTS syrax_migrations ("
-                      "id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL UNIQUE, "
-                      "applied_at TIMESTAMPTZ NOT NULL DEFAULT now())");
+        switch (dialect_) {
+            case Dialect::Postgres:
+                client_->execSqlSync("CREATE TABLE IF NOT EXISTS syrax_migrations ("
+                                     "id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL UNIQUE, "
+                                     "applied_at TIMESTAMPTZ NOT NULL DEFAULT now())");
+                return;
+
+            case Dialect::Mysql:
+                client_->execSqlSync("CREATE TABLE IF NOT EXISTS syrax_migrations ("
+                                     "id BIGINT AUTO_INCREMENT PRIMARY KEY, "
+                                     "name VARCHAR(191) NOT NULL UNIQUE, "
+                                     "applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)");
+                return;
+
+            case Dialect::Sqlite:
+                client_->execSqlSync("CREATE TABLE IF NOT EXISTS syrax_migrations ("
+                                     "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                                     "name TEXT NOT NULL UNIQUE, "
+                                     "applied_at TEXT NOT NULL DEFAULT (datetime('now')))");
+                return;
+        }
     }
 
     bool isApplied(const std::string& name) {
@@ -521,10 +623,17 @@ private:
         }
     }
 
+    // El .env se lee antes de construir la conexion, no dentro: asi el
+    // constructor que la recibe hecha no toca el entorno.
+    static db::Connection loadedConnection() {
+        db::loadDotEnv();
+        return db::envConnection();
+    }
+
+    db::Connection                          conn_;
     drogon::orm::DbClientPtr                client_;
     std::vector<std::unique_ptr<Migration>> migrations_;
     Dialect                                 dialect_ = Dialect::Postgres;
-    bool                                    sqlite_  = false;
 };
 
 }  // namespace syrax

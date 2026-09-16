@@ -6,7 +6,8 @@
 // porque es la organizacion que mas gente reconoce de inmediato. Ninguno de
 // esos nombres lo conoce el framework: son archivos C++ normales.
 //
-// Tokens sustituidos: @NAME@ @REPO@ @TAG@ @ENGINE@ @P1@..@P3@
+// Tokens sustituidos: @NAME@ @REPO@ @TAG@ @ENGINE@ @DBENGINE@ @DBUSER@
+//                     @SETUP@ @P1@..@P3@
 
 #include <cstddef>
 #include <iterator>
@@ -14,7 +15,7 @@
 
 namespace tpl {
 
-enum class Engine { Any, Postgres, Sqlite };
+enum class Engine { Any, Postgres, Mysql, Sqlite };
 
 struct File {
     std::string_view path;
@@ -152,6 +153,9 @@ logs/*
 inline constexpr std::string_view kEnvPostgres = R"T(# Puerto donde escucha la app. Un argumento en la linea de comandos lo pisa.
 APP_PORT=8080
 
+# La base de la que cuelgan las rutas de la API.
+API_BASE=/api/v1
+
 DB_ENGINE=postgres
 DB_HOST=127.0.0.1
 
@@ -161,13 +165,60 @@ DB_PORT=5432
 DB_NAME=@NAME@
 DB_USER=postgres
 DB_PASSWORD=postgres
+DB_POOL=4
+
+# Cache en Redis. Apagado hasta que lo necesites: sin esto la app no
+# intenta conectarse a ningun Redis.
+CACHE_ENABLED=false
+REDIS_HOST=127.0.0.1
+REDIS_PORT=6379
+REDIS_PASSWORD=
+REDIS_DB=0
+)T";
+
+inline constexpr std::string_view kEnvMysql = R"T(# Puerto donde escucha la app. Un argumento en la linea de comandos lo pisa.
+APP_PORT=8080
+
+# La base de la que cuelgan las rutas de la API.
+API_BASE=/api/v1
+
+DB_ENGINE=mysql
+DB_HOST=127.0.0.1
+
+# Lo usan la app Y el docker-compose. Si el puerto esta ocupado por otro
+# mysql local, cambialo aqui y los dos quedan de acuerdo.
+DB_PORT=3306
+DB_NAME=@NAME@
+DB_USER=root
+DB_PASSWORD=root
+DB_POOL=4
+DB_CHARSET=utf8mb4
+
+# Cache en Redis. Apagado hasta que lo necesites: sin esto la app no
+# intenta conectarse a ningun Redis.
+CACHE_ENABLED=false
+REDIS_HOST=127.0.0.1
+REDIS_PORT=6379
+REDIS_PASSWORD=
+REDIS_DB=0
 )T";
 
 inline constexpr std::string_view kEnvSqlite = R"T(# Puerto donde escucha la app. Un argumento en la linea de comandos lo pisa.
 APP_PORT=8080
 
+# La base de la que cuelgan las rutas de la API.
+API_BASE=/api/v1
+
 DB_ENGINE=sqlite
 DB_FILE=app.db
+
+# Cache en Redis. Apagado hasta que lo necesites: sin esto la app no
+# intenta conectarse a ningun Redis.
+CACHE_ENABLED=false
+REDIS_HOST=127.0.0.1
+REDIS_PORT=6379
+REDIS_PASSWORD=
+REDIS_DB=0
 )T";
 
 inline constexpr std::string_view kCompose = R"T(# docker compose lee el .env de este directorio, asi que DB_PORT es la unica
@@ -196,22 +247,29 @@ volumes:
   pgdata:
 )T";
 
-inline constexpr std::string_view kMigrationPostgres = R"T(CREATE TABLE IF NOT EXISTS users (
-    id         BIGSERIAL PRIMARY KEY,
-    name       TEXT        NOT NULL,
-    email      TEXT        NOT NULL UNIQUE,
-    age        INTEGER     NOT NULL DEFAULT 0,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-)T";
+inline constexpr std::string_view kComposeMysql = R"T(# docker compose lee el .env de este directorio, asi que DB_PORT es la unica
+# fuente de verdad: la cambias ahi y la app y el contenedor quedan de acuerdo.
+#
+# Si el puerto ya esta ocupado (es comun tener varios mysql locales), cambia
+# DB_PORT en .env por uno libre. El 3306 de la derecha es el interno del
+# contenedor y no se toca.
+services:
+  db:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: ${DB_NAME:-@NAME@}
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-root}
+    ports:
+      - "${DB_PORT:-3306}:3306"
+    volumes:
+      - mysqldata:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1"]
+      interval: 5s
+      retries: 10
 
-inline constexpr std::string_view kMigrationSqlite = R"T(CREATE TABLE IF NOT EXISTS users (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    name       TEXT    NOT NULL,
-    email      TEXT    NOT NULL UNIQUE,
-    age        INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT    NOT NULL DEFAULT (datetime('now'))
-);
+volumes:
+  mysqldata:
 )T";
 
 inline constexpr std::string_view kAppConfig = R"T({
@@ -241,6 +299,8 @@ syrax::App create();
 
 inline constexpr std::string_view kBootstrapCpp = R"T(#include "bootstrap/app.hpp"
 
+#include "bootstrap/cache.hpp"
+#include "bootstrap/database.hpp"
 #include "routes/routes.hpp"
 
 #include <filesystem>
@@ -248,18 +308,88 @@ inline constexpr std::string_view kBootstrapCpp = R"T(#include "bootstrap/app.hp
 namespace bootstrap {
 
 syrax::App create() {
+    syrax::loadDotEnv();
+
     if (std::filesystem::exists("config/app.json")) {
         drogon::app().loadConfigFile("config/app.json");
     }
 
-    syrax::db::configureFromEnv();
+    database();
+    cache();
 
     syrax::App app;
 
-    app.docs("@NAME@", "1.0.0");
+    app.docs(syrax::env("APP_NAME", "@NAME@"), syrax::env("APP_VERSION", "1.0.0"));
+    app.base(syrax::env("API_BASE", "/api/v1"));
 
     registerRoutes(app);
     return app;
+}
+
+}  // namespace bootstrap
+)T";
+
+inline constexpr std::string_view kBootstrapDatabaseH = R"T(#pragma once
+
+namespace bootstrap {
+
+void database();
+
+}  // namespace bootstrap
+)T";
+
+inline constexpr std::string_view kBootstrapDatabaseCpp = R"T(#include "bootstrap/database.hpp"
+
+#include <syrax/syrax.hpp>
+
+#include <cstddef>
+
+namespace bootstrap {
+
+void database() {
+    syrax::db::connect({
+        .engine      = syrax::env("DB_ENGINE", "@DBENGINE@"),
+        .host        = syrax::env("DB_HOST", "127.0.0.1"),
+        .port        = static_cast<unsigned short>(syrax::envInt("DB_PORT", 0)),
+        .database    = syrax::env("DB_NAME", "@NAME@"),
+        .username    = syrax::env("DB_USER", "@DBUSER@"),
+        .password    = syrax::env("DB_PASSWORD", "@DBUSER@"),
+        .file        = syrax::env("DB_FILE", "app.db"),
+        .charset     = syrax::env("DB_CHARSET", ""),
+        .connections = static_cast<std::size_t>(syrax::envInt("DB_POOL", 4)),
+    });
+}
+
+}  // namespace bootstrap
+)T";
+
+inline constexpr std::string_view kBootstrapCacheH = R"T(#pragma once
+
+namespace bootstrap {
+
+void cache();
+
+}  // namespace bootstrap
+)T";
+
+inline constexpr std::string_view kBootstrapCacheCpp = R"T(#include "bootstrap/cache.hpp"
+
+#include <syrax/syrax.hpp>
+
+#include <cstddef>
+
+namespace bootstrap {
+
+void cache() {
+    if (!syrax::envBool("CACHE_ENABLED", false)) return;
+
+    syrax::cache::connect({
+        .host        = syrax::env("REDIS_HOST", "127.0.0.1"),
+        .port        = static_cast<unsigned short>(syrax::envInt("REDIS_PORT", 6379)),
+        .password    = syrax::env("REDIS_PASSWORD", ""),
+        .database    = static_cast<unsigned int>(syrax::envInt("REDIS_DB", 0)),
+        .connections = static_cast<std::size_t>(syrax::envInt("REDIS_POOL", 1)),
+    });
 }
 
 }  // namespace bootstrap
@@ -717,6 +847,13 @@ INSERT INTO users (name, email, age) VALUES
 ON CONFLICT (email) DO NOTHING;
 )T";
 
+inline constexpr std::string_view kSeederMysql = R"T(-- Datos de ejemplo. Se corre con: syrax db:seed
+INSERT IGNORE INTO users (name, email, age) VALUES
+    ('Ada Lovelace',  'ada@example.com',  36),
+    ('Alan Turing',   'alan@example.com', 41),
+    ('Grace Hopper',  'grace@example.com', 85);
+)T";
+
 inline constexpr std::string_view kSeederSqlite = R"T(-- Datos de ejemplo. Se corre con: syrax db:seed
 INSERT OR IGNORE INTO users (name, email, age) VALUES
     ('Ada Lovelace',  'ada@example.com',  36),
@@ -836,6 +973,8 @@ inline constexpr std::string_view kMain = R"T(#include <syrax/syrax.hpp>
 
 #include <cstdint>
 #include <cstdlib>
+#include <iostream>
+#include <stdexcept>
 #include <string>
 
 namespace {
@@ -861,8 +1000,13 @@ int main(int argc, char** argv) {
     const auto port = arg.empty() ? syrax::envPort()
                                   : static_cast<std::uint16_t>(std::atoi(arg.c_str()));
 
-    auto app = bootstrap::create();
-    app.run(port);
+    try {
+        auto app = bootstrap::create();
+        app.run(port);
+    } catch (const std::exception& e) {
+        std::cerr << "\nerror: " << e.what() << "\n\n";
+        return 1;
+    }
     return 0;
 }
 )T";
@@ -923,7 +1067,7 @@ void registerRoutes(syrax::App& app) {
         return health::Status{.status = "ok"};
     });
 
-    routes::v1::register_(app.group("/api/v1"));
+    routes::v1::register_(app.api());
 }
 )T";
 
@@ -1269,15 +1413,19 @@ inline constexpr File kProjectFiles[] = {
     {"README.md",                                kReadme},
     {"config/app.json",                          kAppConfig},
     {".env.example",                             kEnvPostgres,       Engine::Postgres},
+    {".env.example",                             kEnvMysql,          Engine::Mysql},
     {".env.example",                             kEnvSqlite,         Engine::Sqlite},
     {".env",                                     kEnvPostgres,       Engine::Postgres},
+    {".env",                                     kEnvMysql,          Engine::Mysql},
     {".env",                                     kEnvSqlite,         Engine::Sqlite},
     {"docker-compose.yml",                       kCompose,           Engine::Postgres},
+    {"docker-compose.yml",                       kComposeMysql,      Engine::Mysql},
 
     {"database/migrations.hpp",                  kMigrationsH},
     {"database/migrations.cpp",                  kMigrationsCpp},
     {"database/migrations/001_create_users.hpp", kMigrationUsers},
     {"database/seeders/001_users.sql",           kSeederPostgres,    Engine::Postgres},
+    {"database/seeders/001_users.sql",           kSeederMysql,       Engine::Mysql},
     {"database/seeders/001_users.sql",           kSeederSqlite,      Engine::Sqlite},
     {"database/factories/UserFactory.hpp",       kUserFactory},
     {"tests/CMakeLists.txt",                     kTestsCMake},
@@ -1292,6 +1440,10 @@ inline constexpr File kProjectFiles[] = {
     {"src/main.cpp",                             kMain},
     {"src/bootstrap/app.hpp",                    kBootstrapH},
     {"src/bootstrap/app.cpp",                    kBootstrapCpp},
+    {"src/bootstrap/database.hpp",               kBootstrapDatabaseH},
+    {"src/bootstrap/database.cpp",               kBootstrapDatabaseCpp},
+    {"src/bootstrap/cache.hpp",                  kBootstrapCacheH},
+    {"src/bootstrap/cache.cpp",                  kBootstrapCacheCpp},
     {"src/routes/routes.hpp",                    kRoutesH},
     {"src/routes/routes.cpp",                    kRoutesCpp},
     {"src/routes/v1.hpp",                        kRoutesV1H},

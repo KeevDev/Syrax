@@ -392,6 +392,23 @@ public:
     // Registra bajo un prefijo comun: app.group("/api/v1").
     Group group(const std::string& prefix) { return Group{*this, prefix}; }
 
+    // La base de la API: se declara una vez, en la configuracion, y de ahi
+    // cuelgan todas las rutas de negocio.
+    //
+    //   app.base("/api/v1");                 // en bootstrap
+    //   routes::v1::register_(app.api());    // en routes
+    //
+    // Las rutas que no son de la API (un /health, los estaticos) se siguen
+    // registrando con su ruta completa: la base no es un prefijo global.
+    App& base(std::string prefix) {
+        base_ = std::move(prefix);
+        return *this;
+    }
+
+    const std::string& base() const { return base_; }
+
+    Group api() { return Group{*this, base_}; }
+
     // Middleware global: corre antes de cada handler, en orden de registro.
     App& use(Middleware middleware) {
         middlewares_.push_back({.prefix = {}, .fn = std::move(middleware)});
@@ -660,6 +677,7 @@ private:
     std::vector<std::string>         sockets_;
     std::string            title_       = "API";
     std::string            version_     = "1.0.0";
+    std::string            base_        = "/api/v1";
     bool                   docsEnabled_ = true;
     bool                   banner_      = true;
 

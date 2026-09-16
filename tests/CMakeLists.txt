@@ -18,6 +18,7 @@ add_executable(syrax_tests
     validation_test.cpp
     query_test.cpp
     envport_test.cpp
+    config_test.cpp
     ws_test.cpp
 )
 target_link_libraries(syrax_tests PRIVATE syrax::syrax Catch2::Catch2WithMain)

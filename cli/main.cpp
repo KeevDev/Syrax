@@ -74,21 +74,24 @@ constexpr std::string_view kDefaultTag  = "v" SYRAX_VERSION;
 std::string substitute(std::string_view tpl, std::string_view name,
                        std::string_view repo, std::string_view tag,
                        tpl::Engine engine) {
-    const bool pg = (engine == tpl::Engine::Postgres);
+    const bool pg    = (engine == tpl::Engine::Postgres);
+    const bool mysql = (engine == tpl::Engine::Mysql);
 
     const std::string setup =
-        pg ? "docker compose up -d" : "# sqlite no necesita nada";
+        (pg || mysql) ? "docker compose up -d" : "# sqlite no necesita nada";
 
     const std::pair<std::string_view, std::string> subs[] = {
-        {"@NAME@",   std::string{name}},
-        {"@REPO@",   std::string{repo}},
-        {"@TAG@",    std::string{tag}},
-        {"@ENGINE@", pg ? "PostgreSQL" : "SQLite"},
-        {"@SETUP@",  setup},
-        // Postgres numera los parametros; SQLite usa '?' posicional.
-        {"@P1@",     pg ? "$1" : "?"},
-        {"@P2@",     pg ? "$2" : "?"},
-        {"@P3@",     pg ? "$3" : "?"},
+        {"@NAME@",     std::string{name}},
+        {"@REPO@",     std::string{repo}},
+        {"@TAG@",      std::string{tag}},
+        {"@ENGINE@",   pg ? "PostgreSQL" : mysql ? "MySQL" : "SQLite"},
+        {"@DBENGINE@", pg ? "postgres" : mysql ? "mysql" : "sqlite"},
+        {"@DBUSER@",   pg ? "postgres" : mysql ? "root" : ""},
+        {"@SETUP@",    setup},
+        // Postgres numera los parametros; mysql y sqlite usan '?' posicional.
+        {"@P1@",       pg ? "$1" : "?"},
+        {"@P2@",       pg ? "$2" : "?"},
+        {"@P3@",       pg ? "$3" : "?"},
     };
 
     std::string out{tpl};
@@ -193,20 +196,22 @@ bool inProject() {
 tpl::Engine promptEngine() {
     if (!isatty(STDIN_FILENO)) {
         std::cout << "sin terminal interactiva: usando postgres "
-                     "(cambialo con --db sqlite)\n";
+                     "(cambialo con --db mysql|sqlite)\n";
         return tpl::Engine::Postgres;
     }
 
     std::cout << "motor de base de datos:\n"
               << "  1) postgres  — trae docker-compose.yml listo\n"
-              << "  2) sqlite    — sin dependencias, arranca solo\n"
+              << "  2) mysql     — trae docker-compose.yml listo\n"
+              << "  3) sqlite    — sin dependencias, arranca solo\n"
               << "eleccion [1]: " << std::flush;
 
     std::string line;
     std::getline(std::cin, line);
 
-    return (line == "2" || line == "sqlite") ? tpl::Engine::Sqlite
-                                             : tpl::Engine::Postgres;
+    if (line == "2" || line == "mysql" || line == "mariadb") return tpl::Engine::Mysql;
+    if (line == "3" || line == "sqlite" || line == "sqlite3") return tpl::Engine::Sqlite;
+    return tpl::Engine::Postgres;
 }
 
 // Lee el .env del proyecto. No es un parser completo de dotenv: KEY=VALUE,
@@ -255,22 +260,27 @@ int runSqlDir(const std::string& dir, const std::string& label) {
     std::ranges::sort(files);
 
     const bool sqlite = (engine == "sqlite" || engine == "sqlite3");
+    const bool mysql  = (engine == "mysql" || engine == "mariadb");
+
+    const auto at = [&](const char* k, const char* d) {
+        return env.count(k) ? env.at(k) : std::string{d};
+    };
 
     std::string prefix;
     if (sqlite) {
-        const auto file = env.count("DB_FILE") ? env.at("DB_FILE") : "app.db";
-        prefix          = "sqlite3 '" + file + "' < ";
+        prefix = "sqlite3 '" + at("DB_FILE", "app.db") + "' < ";
+    } else if (mysql) {
+        prefix = "mysql --host=" + at("DB_HOST", "127.0.0.1") +
+                 " --port=" + at("DB_PORT", "3306") + " --user=" + at("DB_USER", "root") +
+                 " --password=" + at("DB_PASSWORD", "root") + " " + at("DB_NAME", "app") + " < ";
     } else {
-        const auto at = [&](const char* k, const char* d) {
-            return env.count(k) ? env.at(k) : std::string{d};
-        };
         prefix = "psql 'postgres://" + at("DB_USER", "postgres") + ":" +
                  at("DB_PASSWORD", "postgres") + "@" + at("DB_HOST", "127.0.0.1") + ":" +
                  at("DB_PORT", "5432") + "/" + at("DB_NAME", "app") +
                  "' -v ON_ERROR_STOP=1 -q -f ";
     }
 
-    std::cout << label << " (" << (sqlite ? "sqlite" : "postgres") << ")\n";
+    std::cout << label << " (" << engine << ")\n";
 
     for (const auto& file : files) {
         std::cout << "  " << file.filename().string() << std::flush;
@@ -324,14 +334,18 @@ int cmdNew(const std::string& name, tpl::Engine engine, bool engineGiven) {
         written.emplace_back(file.path);
     }
 
-    const bool pg = (engine == tpl::Engine::Postgres);
+    const bool contenedor = (engine != tpl::Engine::Sqlite);
 
-    std::cout << "\ncreado " << name << "/  (" << (pg ? "postgres" : "sqlite") << ")\n";
+    const std::string motor = engine == tpl::Engine::Postgres ? "postgres"
+                              : engine == tpl::Engine::Mysql  ? "mysql"
+                                                              : "sqlite";
+
+    std::cout << "\ncreado " << name << "/  (" << motor << ")\n";
     for (const auto& path : written) std::cout << "  " << path << "\n";
 
     std::cout << "\nsiguiente paso:\n"
               << "  cd " << name << "\n";
-    if (pg) {
+    if (contenedor) {
         std::cout << "  docker compose up -d\n";
     }
     std::cout << "  syrax migrate\n"
@@ -718,6 +732,7 @@ int cmdMakeModel(const std::string& table) {
 
     const auto engine = dotEnv("DB_ENGINE", "postgres");
     const bool sqlite = (engine == "sqlite" || engine == "sqlite3");
+    const bool mysql  = (engine == "mysql" || engine == "mariadb");
 
     const fs::path dir = "src/models/generated";
     fs::create_directories(dir);
@@ -732,6 +747,13 @@ int cmdMakeModel(const std::string& table) {
     if (sqlite) {
         config << "    \"rdbms\": \"sqlite3\",\n"
                << "    \"filename\": \"" << dotEnv("DB_FILE", "app.db") << "\",\n";
+    } else if (mysql) {
+        config << "    \"rdbms\": \"mysql\",\n"
+               << "    \"host\": \"" << dotEnv("DB_HOST", "127.0.0.1") << "\",\n"
+               << "    \"port\": " << dotEnv("DB_PORT", "3306") << ",\n"
+               << "    \"dbname\": \"" << dotEnv("DB_NAME", "app") << "\",\n"
+               << "    \"user\": \"" << dotEnv("DB_USER", "root") << "\",\n"
+               << "    \"password\": \"" << dotEnv("DB_PASSWORD", "") << "\",\n";
     } else {
         config << "    \"rdbms\": \"postgresql\",\n"
                << "    \"host\": \"" << dotEnv("DB_HOST", "127.0.0.1") << "\",\n"
@@ -777,7 +799,7 @@ int usage() {
         "syrax " SYRAX_VERSION "\n"
         "\n"
         "uso:\n"
-        "  new <nombre> [--db postgres|sqlite]   n    crea un proyecto\n"
+        "  new <nombre> [--db postgres|mysql|sqlite]  n  crea un proyecto\n"
         "  build                                 b    configura y compila\n"
         "  serve [--port N] [--no-watch]         s    levanta y recompila al guardar; q sale\n"
         "\n"
@@ -818,10 +840,12 @@ int main(int argc, char** argv) {
                 const auto& value = args[++i];
                 if (value == "sqlite" || value == "sqlite3") {
                     engine = tpl::Engine::Sqlite;
+                } else if (value == "mysql" || value == "mariadb") {
+                    engine = tpl::Engine::Mysql;
                 } else if (value == "postgres" || value == "postgresql" || value == "pg") {
                     engine = tpl::Engine::Postgres;
                 } else {
-                    std::cerr << "error: --db acepta 'postgres' o 'sqlite', no '"
+                    std::cerr << "error: --db acepta 'postgres', 'mysql' o 'sqlite', no '"
                               << value << "'\n";
                     return 1;
                 }

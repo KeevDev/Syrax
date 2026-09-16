@@ -7,14 +7,33 @@
 #include <drogon/orm/Row.h>
 #include <glaze/glaze.hpp>
 
+// Drogon compila el soporte de cada motor solo si encontro su libreria de
+// cliente. config.h dice cuales quedaron dentro; sin el archivo asumimos que
+// estan todos y que el error lo dara Drogon.
+#if defined(__has_include)
+#if __has_include(<drogon/config.h>)
+#include <drogon/config.h>
+#define SYRAX_HAS_POSTGRES USE_POSTGRESQL
+#define SYRAX_HAS_MYSQL    USE_MYSQL
+#define SYRAX_HAS_SQLITE   USE_SQLITE3
+#endif
+#endif
+
+#ifndef SYRAX_HAS_POSTGRES
+#define SYRAX_HAS_POSTGRES 1
+#define SYRAX_HAS_MYSQL    1
+#define SYRAX_HAS_SQLITE   1
+#endif
+
+#include <syrax/env.hpp>
 #include <syrax/traits.hpp>
 
 #include <coroutine>
 #include <cstddef>
 #include <cstdlib>
-#include <fstream>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -22,7 +41,22 @@
 #include <utility>
 #include <vector>
 
-namespace syrax::db {
+namespace syrax {
+
+// Que motor hay detras. Es la lista completa de lo que habla el ORM de
+// Drogon; no hay un cuarto. El resto del framework consulta el dialecto en
+// vez de preguntar por un motor concreto, porque lo que cambia entre ellos es
+// la sintaxis, no el motor en si.
+enum class Dialect { Postgres, Mysql, Sqlite };
+
+namespace db {
+
+// El entorno se lee igual desde la configuracion de la app que desde aqui.
+using syrax::env;
+using syrax::envBool;
+using syrax::envInt;
+using syrax::loadDotEnv;
+using syrax::Dialect;
 
 // Mapea una fila de base de datos a un struct plano.
 //
@@ -73,44 +107,9 @@ T fromRow(const drogon::orm::Row& row) {
     return out;
 }
 
-inline std::string env(const char* key, std::string fallback) {
-    const char* value = std::getenv(key);
-    return (value && *value) ? std::string{value} : std::move(fallback);
-}
-
-// Carga un archivo .env al entorno del proceso. Las variables que ya existen
-// ganan, para que el entorno real siempre pueda sobreescribir al archivo.
-//
-// No es un parser completo de dotenv: KEY=VALUE por linea, ignorando
-// comentarios y comillas envolventes. Alcanza para credenciales.
-inline void loadDotEnv(const std::string& path = ".env") {
-    std::ifstream file(path);
-    if (!file) return;
-
-    std::string line;
-    while (std::getline(file, line)) {
-        if (line.empty() || line[0] == '#') continue;
-
-        const auto eq = line.find('=');
-        if (eq == std::string::npos) continue;
-
-        const auto key   = line.substr(0, eq);
-        auto       value = line.substr(eq + 1);
-
-        if (value.size() >= 2 && (value.front() == '"' || value.front() == '\'') &&
-            value.back() == value.front()) {
-            value = value.substr(1, value.size() - 2);
-        }
-
-        ::setenv(key.c_str(), value.c_str(), /*overwrite=*/0);
-    }
-}
-
-// Que motor se configuro. El query builder lo necesita: postgres numera los
-// parametros ($1, $2) y sqlite usa '?' posicional, y el motor sale del .env,
-// asi que no se puede decidir en compilacion.
-enum class Dialect { Postgres, Sqlite };
-
+// El dialecto activo. El query builder lo necesita: postgres numera los
+// parametros ($1, $2) y mysql y sqlite usan '?' posicional. Sale de la
+// configuracion, asi que no se puede decidir en compilacion.
 inline Dialect& activeDialect() {
     static Dialect dialect = Dialect::Postgres;
     return dialect;
@@ -118,45 +117,188 @@ inline Dialect& activeDialect() {
 
 inline Dialect dialect() { return activeDialect(); }
 
-// Configura la conexion desde variables de entorno, estilo 12-factor.
-//
-//   DB_ENGINE            postgres (default) | sqlite
-//   postgres             DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD
-//   sqlite               DB_FILE
-//
-// Gracias a esto el codigo de la aplicacion es identico con cualquier motor:
-// lo unico que cambia es el SQL.
-inline void configureFromEnv() {
-    loadDotEnv();
+// Si este binario habla ese motor. Drogon puede conocer mysql y aun asi no
+// traerlo dentro, porque al compilarlo no estaba la libreria del cliente:
+// preguntarlo aqui ahorra rastrear un LOG_FATAL a media ejecucion.
+inline bool supports(Dialect engine) {
+    switch (engine) {
+        case Dialect::Postgres: return SYRAX_HAS_POSTGRES;
+        case Dialect::Mysql:    return SYRAX_HAS_MYSQL;
+        case Dialect::Sqlite:   return SYRAX_HAS_SQLITE;
+    }
+    return false;
+}
 
-    const auto engine = env("DB_ENGINE", "postgres");
+// La libreria de cliente que Drogon necesita para hablar ese motor. Sale en
+// el error de arriba, que sin esto deja al lector adivinando que instalar.
+inline std::string engineLibrary(Dialect engine) {
+    switch (engine) {
+        case Dialect::Postgres: return "libpq";
+        case Dialect::Mysql:    return "libmysqlclient (o mariadb-connector-c)";
+        case Dialect::Sqlite:   return "sqlite3";
+    }
+    return "?";
+}
 
-    if (engine == "sqlite" || engine == "sqlite3") {
-        activeDialect() = Dialect::Sqlite;
-        drogon::app().addDbClient(drogon::orm::Sqlite3Config{
-            .connectionNumber = 1,
-            .filename         = env("DB_FILE", "app.db"),
-            .name             = "default",
-            .timeout          = -1.0,
-        });
-        return;
+inline std::string engineName(Dialect engine) {
+    switch (engine) {
+        case Dialect::Postgres: return "postgres";
+        case Dialect::Mysql:    return "mysql";
+        case Dialect::Sqlite:   return "sqlite";
+    }
+    return "?";
+}
+
+// El nombre del motor tal como se escribe en una configuracion. Acepta los
+// alias de cada quien porque es un valor escrito a mano, no una constante.
+inline Dialect engineFromName(std::string name) {
+    for (auto& c : name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+    if (name == "postgres" || name == "postgresql" || name == "pgsql" || name == "pg") {
+        return Dialect::Postgres;
+    }
+    if (name == "mysql" || name == "mariadb") return Dialect::Mysql;
+    if (name == "sqlite" || name == "sqlite3") return Dialect::Sqlite;
+
+    throw std::invalid_argument("syrax: motor '" + name +
+                                "' desconocido. Drogon habla postgres, mysql y sqlite.");
+}
+
+inline unsigned short defaultPort(Dialect engine) {
+    switch (engine) {
+        case Dialect::Postgres: return 5432;
+        case Dialect::Mysql:    return 3306;
+        case Dialect::Sqlite:   return 0;
+    }
+    return 0;
+}
+
+// Los datos de una conexion, sin decidir de donde salen. La aplicacion arma
+// esto en su configuracion (de un .env, de un JSON, o a mano) y llama a
+// connect(). Los campos que no aplican al motor elegido se ignoran, para que
+// una misma estructura describa cualquiera de los tres.
+struct Connection {
+    std::string    engine      = "postgres";
+    std::string    host        = "127.0.0.1";
+    unsigned short port        = 0;  // 0 toma el puerto habitual del motor
+    std::string    database    = "app";
+    std::string    username    = "postgres";
+    std::string    password    = "postgres";
+    std::string    file        = "app.db";  // sqlite
+    std::string    charset     = "";        // mysql
+    std::size_t    connections = 4;
+    double         timeout     = -1.0;
+    bool           fast        = false;
+    bool           autoBatch   = false;  // postgres
+    std::string    name        = "default";
+
+    std::unordered_map<std::string, std::string> options;  // postgres
+};
+
+namespace detail {
+
+// Quien fija el dialecto global cuando hay varias conexiones. La llamada
+// "default" manda; si no hay ninguna con ese nombre, vale la primera.
+inline void adoptDialect(Dialect engine, const std::string& name) {
+    static bool fixed = false;
+    if (fixed) return;
+
+    activeDialect() = engine;
+    if (name == "default") fixed = true;
+}
+
+}  // namespace detail
+
+// Registra una conexion en Drogon. Se puede llamar varias veces con nombres
+// distintos: la aplicacion pide cada cliente por su nombre con client("...").
+inline void connect(const Connection& conn) {
+    const auto engine = engineFromName(conn.engine);
+
+    if (!supports(engine)) {
+        throw std::runtime_error("syrax: este Drogon se compilo sin soporte de " +
+                                 engineName(engine) + ". Instala " + engineLibrary(engine) +
+                                 " y vuelve a compilar (borra build/ para que Drogon se "
+                                 "reconfigure), o cambia el motor de la conexion '" +
+                                 conn.name + "'.");
     }
 
-    activeDialect() = Dialect::Postgres;
-    drogon::app().addDbClient(drogon::orm::PostgresConfig{
-        .host             = env("DB_HOST", "127.0.0.1"),
-        .port             = static_cast<unsigned short>(std::stoi(env("DB_PORT", "5432"))),
-        .databaseName     = env("DB_NAME", "app"),
-        .username         = env("DB_USER", "postgres"),
-        .password         = env("DB_PASSWORD", "postgres"),
-        .connectionNumber = 4,
-        .name             = "default",
-        .isFast           = false,
-        .characterSet     = "",
-        .timeout          = -1.0,
-        .autoBatch        = false,
-        .connectOptions   = {},
-    });
+    detail::adoptDialect(engine, conn.name);
+
+    const auto port = conn.port != 0 ? conn.port : defaultPort(engine);
+
+    switch (engine) {
+        case Dialect::Postgres:
+            drogon::app().addDbClient(drogon::orm::PostgresConfig{
+                .host             = conn.host,
+                .port             = port,
+                .databaseName     = conn.database,
+                .username         = conn.username,
+                .password         = conn.password,
+                .connectionNumber = conn.connections,
+                .name             = conn.name,
+                .isFast           = conn.fast,
+                .characterSet     = conn.charset,
+                .timeout          = conn.timeout,
+                .autoBatch        = conn.autoBatch,
+                .connectOptions   = conn.options,
+            });
+            return;
+
+        case Dialect::Mysql:
+            drogon::app().addDbClient(drogon::orm::MysqlConfig{
+                .host             = conn.host,
+                .port             = port,
+                .databaseName     = conn.database,
+                .username         = conn.username,
+                .password         = conn.password,
+                .connectionNumber = conn.connections,
+                .name             = conn.name,
+                .isFast           = conn.fast,
+                .characterSet     = conn.charset,
+                .timeout          = conn.timeout,
+            });
+            return;
+
+        case Dialect::Sqlite:
+            // Un archivo no admite concurrencia real: mas conexiones solo
+            // reparten esperas sobre el mismo lock.
+            drogon::app().addDbClient(drogon::orm::Sqlite3Config{
+                .connectionNumber = 1,
+                .filename         = conn.file,
+                .name             = conn.name,
+                .timeout          = conn.timeout,
+            });
+            return;
+    }
+}
+
+// La conexion que describe el entorno, estilo 12-factor:
+//
+//   DB_ENGINE   postgres (default) | mysql | sqlite
+//   postgres    DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD DB_POOL
+//   mysql       DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD DB_POOL DB_CHARSET
+//   sqlite      DB_FILE
+inline Connection envConnection(const std::string& name = "default") {
+    Connection conn;
+    conn.engine      = env("DB_ENGINE", conn.engine);
+    conn.host        = env("DB_HOST", conn.host);
+    conn.port        = static_cast<unsigned short>(envInt("DB_PORT", 0));
+    conn.database    = env("DB_NAME", conn.database);
+    conn.username    = env("DB_USER", conn.username);
+    conn.password    = env("DB_PASSWORD", conn.password);
+    conn.file        = env("DB_FILE", conn.file);
+    conn.charset     = env("DB_CHARSET", conn.charset);
+    conn.connections = static_cast<std::size_t>(envInt("DB_POOL", 4));
+    conn.name        = name;
+    return conn;
+}
+
+// El atajo de siempre: leer el .env y conectar. Un proyecto que quiera
+// decidir mas (varias conexiones, valores que no vienen del entorno) arma la
+// Connection el mismo y llama a connect().
+inline void configureFromEnv() {
+    loadDotEnv();
+    connect(envConnection());
 }
 
 inline drogon::orm::DbClientPtr client(const std::string& name = "default") {
@@ -449,4 +591,5 @@ auto transaction(F body) -> decltype(body(std::declval<const Tx&>())) {
     co_return co_await transactionOn(client(), std::move(body));
 }
 
-}  // namespace syrax::db
+}  // namespace db
+}  // namespace syrax

@@ -124,6 +124,25 @@ int main() {
         co_return PostResource{.id = id, .title = body.title};
     });
 
+    app.base(syrax::env("API_BASE", "/api/v1"));
+
+    db::connect({
+        .engine      = syrax::env("DB_ENGINE", "postgres"),
+        .host        = syrax::env("DB_HOST", "127.0.0.1"),
+        .port        = static_cast<unsigned short>(syrax::envInt("DB_PORT", 0)),
+        .database    = syrax::env("DB_NAME", "api"),
+        .username    = syrax::env("DB_USER", "postgres"),
+        .password    = syrax::env("DB_PASSWORD", "postgres"),
+        .connections = static_cast<std::size_t>(syrax::envInt("DB_POOL", 4)),
+    });
+
+    if (syrax::envBool("CACHE_ENABLED", false)) {
+        cache::connect({
+            .host = syrax::env("REDIS_HOST", "127.0.0.1"),
+            .port = static_cast<unsigned short>(syrax::envInt("REDIS_PORT", 6379)),
+        });
+    }
+
     auto api = app.group("/api/v1");
     api.get("/users/{id}", [](std::int64_t id) -> Task<Result<PostResource>> {
         co_return PostResource{.id = id, .title = "x"};

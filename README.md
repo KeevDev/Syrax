@@ -179,6 +179,8 @@ El mapeo columna → campo lo resuelve Glaze en tiempo de compilación por nombr
 
 Conservas de Drogon el pool de conexiones, las corrutinas y los prepared statements. Así escrito, el SQL está a la vista; si prefieres no repetir la lista de columnas, hay un [query builder tipado](#query-builder-tipado) sobre el mismo struct.
 
+**Los tres motores del ORM de Drogon.** `DB_ENGINE` acepta `postgres`, `mysql` (o `mariadb`) y `sqlite`, que son todos los que Drogon habla. Lo que cambia entre ellos lo absorbe el framework: el query builder numera los parámetros en Postgres (`$1`) y los deja posicionales (`?`) en los otros dos, y las migraciones escriben el DDL de cada uno. Drogon compila el soporte de un motor solo si encontró su librería de cliente, así que pedir uno que no está da un error con nombre al arrancar —qué instalar— en vez de un `LOG_FATAL` a media ejecución.
+
 Para un valor suelto no hace falta declarar un struct:
 
 ```cpp
@@ -404,9 +406,37 @@ const auto spec = app.openApi();   // lo mismo que sirve /openapi.json
 
 Sin terminal interactiva —un contenedor, CI, una tubería— no hay teclado que escuchar y se comporta como siempre. `--no-watch` apaga la vigilancia.
 
-### Puerto y configuración
+### Configuración
 
-El puerto se resuelve igual que las credenciales, de más a menos prioridad:
+La configuración de un proyecto vive en `src/bootstrap/`, un archivo por cosa que se configura, y son funciones C++ normales — no un formato que haya que aprender:
+
+```
+src/bootstrap/
+├── app.cpp        junta todo: .env, base de la API, y llama a las de abajo
+├── database.cpp   la conexión a la base
+└── cache.cpp      el Redis, si lo enciendes
+```
+
+```cpp
+// src/bootstrap/database.cpp
+void database() {
+    syrax::db::connect({
+        .engine      = syrax::env("DB_ENGINE", "postgres"),
+        .host        = syrax::env("DB_HOST", "127.0.0.1"),
+        .port        = static_cast<unsigned short>(syrax::envInt("DB_PORT", 0)),
+        .database    = syrax::env("DB_NAME", "api"),
+        .username    = syrax::env("DB_USER", "postgres"),
+        .password    = syrax::env("DB_PASSWORD", "postgres"),
+        .connections = static_cast<std::size_t>(syrax::envInt("DB_POOL", 4)),
+    });
+}
+```
+
+El valor por defecto está **al lado** de la clave, y se ve de un vistazo qué lee la app del entorno. `syrax::env`, `envInt` y `envBool` leen el proceso con respaldo al `.env`; lo que ya existe en el entorno gana siempre, para que el despliegue pueda pisar el archivo. Un valor mal escrito (`DB_PORT=cinco`) avisa por `stderr` en vez de caer en silencio al default.
+
+Llamar varias veces a `connect()` con `name` distinto da varias conexiones; `db::client("informes")` pide una por nombre.
+
+**El puerto** se resuelve de más a menos prioridad:
 
 ```bash
 ./mi-api 3000        # 1. argumento explícito
@@ -414,7 +444,48 @@ APP_PORT=3000        # 2. entorno, o el .env
                      # 3. 8080
 ```
 
-`syrax::envPort()` hace esa resolución. Un `APP_PORT` inválido no se ignora en silencio: avisa por `stderr` y cae al default, porque quien escribió `APP_PORT=ocho` quiso decir algo.
+**La base de la API** se declara una vez, en `bootstrap/app.cpp`, y las rutas cuelgan de ahí:
+
+```cpp
+app.base(syrax::env("API_BASE", "/api/v1"));   // en bootstrap
+routes::v1::register_(app.api());              // en routes/routes.cpp
+```
+
+Cambiar `API_BASE` mueve la API entera sin tocar una sola ruta. Lo que no es de la API —un `/health`, los estáticos— se sigue registrando con su ruta completa: la base no es un prefijo global.
+
+### Cache
+
+Redis, configurado igual que la base y apagado hasta que lo enciendas:
+
+```cpp
+// src/bootstrap/cache.cpp
+void cache() {
+    if (!syrax::envBool("CACHE_ENABLED", false)) return;
+
+    syrax::cache::connect({
+        .host = syrax::env("REDIS_HOST", "127.0.0.1"),
+        .port = static_cast<unsigned short>(syrax::envInt("REDIS_PORT", 6379)),
+    });
+}
+```
+
+```cpp
+co_await cache::put("users.total", "42", std::chrono::minutes{10});
+const auto total = co_await cache::get("users.total");   // optional<string>
+co_await cache::forget("users.total");
+```
+
+Y el patrón de siempre, que además serializa por ti:
+
+```cpp
+co_return co_await cache::remember<std::vector<User>>(
+    "users.activos", std::chrono::minutes{10},
+    [] { return repo::activos(); });
+```
+
+El valor viaja como JSON, así que sirve para cualquier struct que el resto del framework ya sabe serializar. Si el JSON guardado ya no encaja con el tipo —cambiaste el struct— se trata como un fallo de cache: se recalcula y se pisa, en vez de reventar.
+
+`cache::client()` da el `RedisClient` de Drogon para todo lo demás. Pedirlo antes de `app.run()` lanza con un mensaje en vez de un segfault: Drogon crea sus clientes al arrancar.
 
 ### Middleware, autenticación y políticas
 
@@ -497,7 +568,7 @@ config/app.json           ajustes del servidor (versionado)
 .env                      credenciales (NO versionado)
 .env.example              las mismas claves, sin valores (SI versionado)
 docker/Dockerfile         imagen multi-etapa
-docker-compose.yml        postgres, si elegiste ese motor
+docker-compose.yml        postgres o mysql, si elegiste uno de los dos
 public/
 ├── index.html            portada: Syrax, y dos tarjetones
 ├── dragon.jpg            la ilustracion de la portada
@@ -513,7 +584,7 @@ database/
 
 src/
 ├── main.cpp
-├── bootstrap/            preparacion de la app
+├── bootstrap/            configuracion: app.cpp, database.cpp, cache.cpp
 ├── routes/               el mapa de la API, versionable
 │   ├── routes.cpp        /health y el alta de cada version
 │   └── v1.cpp            una linea por endpoint: ruta -> metodo del controlador, sin repetir el prefijo
@@ -533,8 +604,8 @@ tests/
 **Por qué la ruta no vive en el controlador:** `routes/v1.cpp` se lee de un vistazo y dice qué expone esta versión de la API; el controlador dice qué hace cada acción. Un handler es una función normal, así que la ruta lo nombra y ya:
 
 ```cpp
-// routes/routes.cpp — la base se escribe una vez
-routes::v1::register_(app.group("/api/v1"));
+// routes/routes.cpp — la base sale de bootstrap, aqui solo se usa
+routes::v1::register_(app.api());
 ```
 
 ```cpp
@@ -556,7 +627,7 @@ Task<Result<UserResource>> show(std::int64_t id) {   // el controlador
 
 Syrax deduce de esa firma el path param, el body a parsear y el esquema que documenta, igual que con una lambda. Cambiar la URL o versionar la API no toca el controlador.
 
-**Grupos y alias.** `group()` anida (`app.group("/api/v1").group("/admin")`), y `as()` le pone nombre a una ruta para no volver a escribirla:
+**Grupos y alias.** `app.api()` es el grupo de la base; `group()` anida (`app.api().group("/admin")`), y `as()` le pone nombre a una ruta para no volver a escribirla:
 
 ```cpp
 urlFor("users.show", 42)   // "/api/v1/users/42"
@@ -590,7 +661,7 @@ Agregar un archivo a `tests/` no obliga a tocar ningún CMake, y `database/facto
 
 | | | |
 |---|---|---|
-| `syrax new <nombre>` | `n` | crea un proyecto (`--db postgres\|sqlite`) |
+| `syrax new <nombre>` | `n` | crea un proyecto (`--db postgres\|mysql\|sqlite`) |
 | `syrax build` | `b` | configura y compila |
 | `syrax serve` | `s` | levanta y **recompila al guardar** (`--port N`, `--no-watch`) |
 | `syrax migrate` | `m` | aplica las migraciones pendientes |

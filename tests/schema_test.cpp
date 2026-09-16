@@ -282,3 +282,83 @@ TEST_CASE("agregar y modificar conviven en la misma migracion", "[schema][alter]
     CHECK(sql[0] == R"(ALTER TABLE "users" ADD COLUMN "phone" VARCHAR(255))");
     CHECK(sql[1] == R"(ALTER TABLE "users" ALTER COLUMN "email" TYPE VARCHAR(320))");
 }
+
+// ------------------------------------------------------------------ MySQL
+
+TEST_CASE("mysql cita los identificadores con acentos graves") {
+    const auto sql = ddl(Dialect::Mysql, [](Blueprint& t) { t.string("name"); });
+
+    CHECK_THAT(sql, ContainsSubstring("`users`"));
+    CHECK_THAT(sql, ContainsSubstring("`name`"));
+    CHECK_THAT(sql, !ContainsSubstring("\"users\""));
+}
+
+TEST_CASE("mysql numera la clave primaria con AUTO_INCREMENT") {
+    CHECK_THAT(ddl(Dialect::Mysql, [](Blueprint& t) { t.id(); }),
+               ContainsSubstring("`id` BIGINT AUTO_INCREMENT PRIMARY KEY"));
+}
+
+TEST_CASE("los tipos cambian con el motor") {
+    const auto builder = [](Blueprint& t) {
+        t.boolean("activo");
+        t.json("meta");
+        t.timestamp("visto_at");
+    };
+
+    const auto mysql = ddl(Dialect::Mysql, builder);
+    CHECK_THAT(mysql, ContainsSubstring("TINYINT(1)"));
+    CHECK_THAT(mysql, ContainsSubstring("`meta` JSON"));
+    CHECK_THAT(mysql, ContainsSubstring("DATETIME"));
+
+    const auto postgres = ddl(Dialect::Postgres, builder);
+    CHECK_THAT(postgres, ContainsSubstring("BOOLEAN"));
+    CHECK_THAT(postgres, ContainsSubstring("JSONB"));
+    CHECK_THAT(postgres, ContainsSubstring("TIMESTAMPTZ"));
+}
+
+TEST_CASE("mysql no acepta IF NOT EXISTS al crear un indice") {
+    const auto sql = ddl(Dialect::Mysql, [](Blueprint& t) { t.string("email").index(); });
+
+    CHECK_THAT(sql, ContainsSubstring("CREATE INDEX `idx_users_email` ON `users`"));
+    CHECK_THAT(sql, !ContainsSubstring("IF NOT EXISTS"));
+}
+
+TEST_CASE("mysql redefine la columna en una sola sentencia") {
+    Schema schema{Dialect::Mysql};
+    schema.table("users", [](Blueprint& t) { t.string("email", 320).nullable().change(); });
+
+    REQUIRE(schema.statements().size() == 1);
+    CHECK_THAT(schema.statements()[0],
+               ContainsSubstring("MODIFY COLUMN `email` VARCHAR(320) NULL"));
+}
+
+TEST_CASE("en mysql un unique se quita como indice") {
+    Schema schema{Dialect::Mysql};
+    schema.table("users", [](Blueprint& t) { t.dropUnique("email"); });
+
+    REQUIRE(schema.statements().size() == 1);
+    CHECK_THAT(schema.statements()[0], ContainsSubstring("DROP INDEX `uq_users_email`"));
+}
+
+TEST_CASE("en mysql un check se quita con DROP CHECK") {
+    Schema schema{Dialect::Mysql};
+    schema.table("users", [](Blueprint& t) { t.dropConstraint("age_no_negativa"); });
+
+    REQUIRE(schema.statements().size() == 1);
+    CHECK_THAT(schema.statements()[0], ContainsSubstring("DROP CHECK `age_no_negativa`"));
+}
+
+TEST_CASE("el indice de mysql se borra nombrando la tabla") {
+    Schema schema{Dialect::Mysql};
+    schema.table("users", [](Blueprint& t) { t.dropIndex("email"); });
+
+    REQUIRE(schema.statements().size() == 1);
+    CHECK_THAT(schema.statements()[0], ContainsSubstring("DROP INDEX `idx_users_email` ON `users`"));
+}
+
+TEST_CASE("sqlite sigue sin poder alterar columnas") {
+    Schema schema{Dialect::Sqlite};
+    CHECK_THROWS_AS(
+        schema.table("users", [](Blueprint& t) { t.string("email").change(); }),
+        std::logic_error);
+}

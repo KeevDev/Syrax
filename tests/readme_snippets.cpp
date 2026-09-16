@@ -9,6 +9,10 @@
 // Si cambias este archivo, cambia el README, y al reves.
 #include <syrax/syrax.hpp>
 
+#include <drogon/orm/Exception.h>
+
+#include <format>
+
 using namespace syrax;
 
 struct Post        { std::int64_t id; std::string authorId; };
@@ -24,6 +28,37 @@ struct SendWelcome {
 
     Task<void> handle() const { co_return; }
 };
+
+// --- Errores como valores: tus propios errores ---
+
+namespace errors {
+inline syrax::Error saldoInsuficiente(double falta) {
+    return syrax::Conflict("saldo insuficiente")
+        .as("saldo_insuficiente")
+        .explain(std::format("faltan {:.2f}", falta));
+}
+}  // namespace errors
+
+inline void ganchosDeError() {
+    syrax::onError([](const syrax::Error& e) {
+        Json::Value body;
+        body["ok"]      = false;
+        body["code"]    = e.code.empty() ? std::to_string(e.status) : e.code;
+        body["message"] = e.message;
+        return syrax::jsonResponse(body, e.status);
+    });
+
+    syrax::onException([](const std::exception& e) -> std::optional<syrax::Error> {
+        if (dynamic_cast<const drogon::orm::UniqueViolation*>(&e))
+            return syrax::Conflict("el recurso ya existe").as("duplicado");
+        return std::nullopt;
+    });
+}
+
+inline void trazaDeEjemplo(const syrax::Request& request, std::int64_t id) {
+    syrax::log::info("pedido confirmado", {{"pedido", std::to_string(id)},
+                                           {"request_id", syrax::log::requestId(request)}});
+}
 
 namespace policies {
 std::optional<Error> update(const Actor& actor, const Post& post) {

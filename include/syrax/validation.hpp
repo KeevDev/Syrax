@@ -3,6 +3,7 @@
 #include <glaze/glaze.hpp>
 #include <json/json.h>
 
+#include <syrax/result.hpp>
 #include <syrax/traits.hpp>
 
 #include <algorithm>
@@ -19,12 +20,7 @@
 
 namespace syrax {
 
-// Un campo que no cumplio una regla. Se acumulan todos antes de responder:
-// una API que devuelve el primer error obliga a descubrir los demas de a uno.
-struct FieldError {
-    std::string field;
-    std::string message;
-};
+// FieldError se define en result.hpp: un Error lo lleva dentro.
 
 // ------------------------------------------------------------------ reglas
 //

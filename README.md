@@ -230,6 +230,55 @@ app.get("/health", []() -> Result<Status> { return Status{.status = "ok"}; });
 
 Es la misma maquinaria: lo que Syrax mira es la firma, no dónde esté escrita.
 
+#### Generar las capas
+
+Escribir seis archivos a mano en el orden correcto es lo que hace que, al tercer endpoint, alguien meta la query en el controlador. El CLI las escribe:
+
+```bash
+syrax make:api Post
+```
+
+```
+creado   src/models/Post/Post.hpp
+creado   src/http/requests/Post/PostRequests.hpp
+creado   src/http/resources/Post/PostResource.hpp
+creado   src/http/resources/Post/PostResource.cpp
+creado   src/repositories/Post/PostRepository.hpp
+creado   src/repositories/Post/PostRepository.cpp
+creado   src/services/Post/PostService.hpp
+creado   src/services/Post/PostService.cpp
+creado   src/http/controllers/Post/PostController.hpp
+creado   src/http/controllers/Post/PostController.cpp
+
+falta la ruta. En src/routes/v1.cpp:
+  ...
+```
+
+La ruta no se toca sola a propósito: es el único archivo donde decides qué se expone y bajo qué alias, y un generador que edita eso por su cuenta acaba peleándose contigo. Te deja las líneas listas para pegar.
+
+Si sólo quieres una capa, `make:controller`, `make:service`, `make:repository`, `make:entity`, `make:request` y `make:resource` hacen exactamente esa. Y los dos que sí se registran solos, porque olvidarlo es el fallo clásico:
+
+```bash
+syrax make:job SendInvoice       # y queda en bootstrap/queue.cpp
+syrax make:migration Post        # y queda en database/migrations.cpp
+```
+
+Un job sin registrar no corre nunca, y el síntoma es una cola que crece en silencio.
+
+Para ver lo que hay montado, sin levantar el servidor:
+
+```bash
+syrax routes
+```
+
+```
+GET     /api/v1/posts                   posts.index
+POST    /api/v1/posts                   posts.store
+DELETE  /api/v1/posts/{id}              posts.destroy
+GET     /api/v1/posts/{id}              posts.show
+PUT     /api/v1/posts/{id}              posts.update
+```
+
 ### Errores como valores
 
 ```cpp
@@ -243,6 +292,66 @@ if (!user) co_return NotFound("user not found");
 ```
 
 Incluso las rutas inexistentes responden JSON, no la página HTML de Drogon.
+
+#### Tus propios errores
+
+Un `Error` puede llevar un **código estable** además del mensaje. El mensaje se reescribe cuando alguien lo mejora; el código es sobre lo que el cliente ramifica:
+
+```cpp
+return Conflict("el email ya existe").as("email_duplicado");
+```
+
+```json
+{ "error": { "status": 409, "message": "el email ya existe", "code": "email_duplicado" } }
+```
+
+`.explain("...")` añade una versión larga para un humano. Los dos campos son opcionales y sólo aparecen cuando los llenas, así que un cliente que hoy lee `error.message` sigue leyendo lo mismo mañana.
+
+Con eso, el catálogo de errores de tu proyecto son funciones que devuelven `Error` y ya:
+
+```cpp
+namespace errors {
+inline syrax::Error saldoInsuficiente(double falta) {
+    return syrax::Conflict("saldo insuficiente")
+        .as("saldo_insuficiente")
+        .explain(std::format("faltan {:.2f}", falta));
+}
+}
+```
+
+#### Cambiar el formato
+
+Si tu frontend ya espera otra forma, sustitúyela una vez:
+
+```cpp
+syrax::onError([](const syrax::Error& e) {
+    Json::Value body;
+    body["ok"]      = false;
+    body["code"]    = e.code.empty() ? std::to_string(e.status) : e.code;
+    body["message"] = e.message;
+    return syrax::jsonResponse(body, e.status);
+});
+```
+
+**El 422 de validación pasa por el mismo gancho**, a propósito: cambiar el formato y quedarte con dos formas de error distintas en la misma API sería peor que no poder cambiarlo. Las cabeceras de seguridad y CORS se siguen aplicando después.
+
+#### Traducir excepciones
+
+Una excepción que se escapa del handler es un 500 con cuerpo JSON y el `what()` **en el log, no en la respuesta** — decía cosas como `no such table: users`, que le describe el esquema a cualquiera que provoque el error.
+
+Lo que tu proyecto sí sabe es qué excepciones merecen otro estado:
+
+```cpp
+syrax::onException([](const std::exception& e) -> std::optional<syrax::Error> {
+    if (dynamic_cast<const drogon::orm::UniqueViolation*>(&e))
+        return syrax::Conflict("el recurso ya existe").as("duplicado");
+    return std::nullopt;
+});
+```
+
+`std::nullopt` significa «ésta no la entiendo»: se queda como el 500 de siempre. Así traduces lo que conoces sin reimplementar el caso por defecto.
+
+> Si sobrescribes el formato, `e.what()` queda a tu alcance. No lo pongas en la respuesta.
 
 ### Validación
 
@@ -554,10 +663,29 @@ La configuración de un proyecto vive en `src/bootstrap/`, un archivo por cosa q
 
 ```
 src/bootstrap/
-├── app.cpp        junta todo: .env, base de la API, y llama a las de abajo
-├── database.cpp   la conexión a la base
-└── cache.cpp      el Redis, si lo enciendes
+├── app.cpp         junta todo: .env, base de la API, y llama a las de abajo
+├── database.cpp    la conexión a la base
+├── cache.cpp       el Redis, si lo enciendes
+├── queue.cpp       el driver de la cola y los jobs registrados
+├── middleware.cpp  CORS, rate limit y cabeceras de seguridad
+└── errors.cpp      qué excepciones merecen otro estado
 ```
+
+```cpp
+// src/bootstrap/middleware.cpp
+void middleware(syrax::App& app) {
+    app.cors({
+        .origins     = {syrax::env("CORS_ORIGINS", "*")},
+        .credentials = syrax::envBool("CORS_CREDENTIALS", false),
+    });
+
+    app.useOnResponse(syrax::securityHeaders());
+
+    app.use(syrax::rateLimit(syrax::envInt("RATE_LIMIT", 120), std::chrono::minutes{1}));
+}
+```
+
+Los tres middlewares vienen puestos en todo proyecto nuevo. Antes existían y no los usaba nadie, porque no se veían desde ningún sitio.
 
 ```cpp
 // src/bootstrap/database.cpp
@@ -594,6 +722,37 @@ routes::v1::register_(app.api());              // en routes/routes.cpp
 ```
 
 Cambiar `API_BASE` mueve la API entera sin tocar una sola ruta. Lo que no es de la API —un `/health`, los estáticos— se sigue registrando con su ruta completa: la base no es un prefijo global.
+
+### Trazabilidad
+
+Cada petición recibe un identificador corto, y con él se puede encontrar *esa* petición entre todas las demás. Va puesto de fábrica: no hay nada que encender.
+
+```
+201  POST   /api/v1/users                          12.4ms  7dw1ubha8o09
+404  GET    /api/v1/users/9999                      0.8ms  k2p0zx4mq1te
+500  POST   /api/v1/orders                         31.7ms  9a8sbd03nfl2
+```
+
+Eso es lo que ves en la terminal mientras desarrollas. Detrás de un pipe —un contenedor, el CI, un recolector de logs— la misma información sale como una línea JSON por evento, porque es lo que esas herramientas saben leer:
+
+```json
+{"ts":"2026-09-16T04:42:27.380Z","level":"info","msg":"request","method":"POST","path":"/users","status":"201","ms":"12.4","ip":"127.0.0.1","request_id":"7dw1ubha8o09"}
+```
+
+El id viaja en la cabecera `X-Request-Id` de la respuesta, así que quien reporta un fallo tiene algo que citar. Y si la petición **ya traía** una —porque la mandó un gateway u otro servicio—, se respeta: la traza cruza el salto entera.
+
+Para tus propios eventos:
+
+```cpp
+syrax::log::info("pedido confirmado", {{"pedido", std::to_string(id)},
+                                       {"request_id", syrax::log::requestId(request)}});
+```
+
+| Variable | Qué hace |
+|---|---|
+| `LOG_FORMAT` | `json` o `text`. Por defecto: texto si hay terminal, JSON si no. |
+| `LOG_LEVEL` | `debug`, `info`, `warn`, `error`. Por defecto `info`. |
+| `LOG_ACCESS` | `0` apaga la línea por petición. |
 
 ### Cache
 
@@ -862,11 +1021,17 @@ Agregar un archivo a `tests/` no obliga a tocar ningún CMake, y `database/facto
 | `syrax new <nombre>` | `n` | crea un proyecto (`--db postgres\|mysql\|sqlite`) |
 | `syrax build` | `b` | configura y compila |
 | `syrax serve` | `s` | levanta y **recompila al guardar** (`--port N`, `--no-watch`) |
+| `syrax routes` | `r` | lista las rutas registradas, con su alias |
 | `syrax migrate` | `m` | aplica las migraciones pendientes |
 | `syrax migrate:rollback` | `m:r` | revierte la última |
 | `syrax migrate:status` | `m:s` | muestra cuáles están aplicadas |
 | `syrax db:seed` | `seed` | carga `database/seeders/*.sql` |
 | `syrax make:model <tabla>` | `m:m` | genera el modelo de Drogon (`Mapper<T>`) desde la base |
+| `syrax make:api <Nombre>` | `m:a` | las seis capas de un recurso, de una vez |
+| `syrax make:controller\|service\|repository <Nombre>` | | una sola capa |
+| `syrax make:entity\|request\|resource <Nombre>` | | una sola capa |
+| `syrax make:job <Nombre>` | `m:j` | un job, **ya registrado** en `bootstrap/queue.cpp` |
+| `syrax make:migration <Nombre>` | `m:mg` | una migración, **ya registrada** en `migrations.cpp` |
 | `syrax queue:work` | `work` | corre los jobs encolados |
 | `syrax queue:failed` | `q:f` | los que se rindieron, con el motivo |
 | `syrax queue:retry` | `q:r` | devuelve los fallidos a la cola |

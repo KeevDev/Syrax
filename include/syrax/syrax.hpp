@@ -5,7 +5,9 @@
 #include <syrax/cache.hpp>
 #include <syrax/db.hpp>
 #include <syrax/env.hpp>
+#include <syrax/errors.hpp>
 #include <syrax/jobs.hpp>
+#include <syrax/log.hpp>
 #include <syrax/middleware.hpp>
 #include <syrax/migration.hpp>
 #include <syrax/openapi.hpp>

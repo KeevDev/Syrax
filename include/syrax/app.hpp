@@ -4,6 +4,8 @@
 #include <glaze/glaze.hpp>
 
 #include <syrax/db.hpp>
+#include <syrax/errors.hpp>
+#include <syrax/log.hpp>
 #include <syrax/middleware.hpp>
 #include <syrax/validation.hpp>
 #include <syrax/ws.hpp>
@@ -11,7 +13,9 @@
 #include <syrax/result.hpp>
 #include <syrax/traits.hpp>
 
+#include <algorithm>
 #include <array>
+#include <cctype>
 #include <charconv>
 #include <cstdint>
 #include <format>
@@ -216,50 +220,19 @@ std::optional<T> convertParam(const std::string& s) {
     }
 }
 
-// Drogon ya tiene renderizada la respuesta para cuando corren sus advices de
-// pre-sending, asi que addHeader() ahi no llega al cliente (se comprobo: el
-// advice dispara, la cabecera no sale). Por eso la cadena se aplica aqui, en
-// el momento en que Syrax construye la respuesta.
-//
-// Es estado global, que normalmente evitariamos; aqui es aceptable porque
-// drogon::app() ya es un singleton y solo hay una aplicacion por proceso.
-inline std::vector<ResponseMiddleware>& responseChain() {
-    static std::vector<ResponseMiddleware> chain;
-    return chain;
-}
-
-inline void applyResponseChain(const drogon::HttpResponsePtr& response) {
-    for (const auto& fn : responseChain()) fn(response);
-}
-
+// Todo error sale por syrax::render(), que es donde la aplicacion puede
+// haber puesto su propio formato con onError().
 inline drogon::HttpResponsePtr makeError(int status, std::string message) {
-    Json::Value body;
-    body["error"]["status"]  = status;
-    body["error"]["message"] = std::move(message);
-    auto resp = drogon::HttpResponse::newHttpJsonResponse(body);
-    resp->setStatusCode(static_cast<drogon::HttpStatusCode>(status));
-    applyResponseChain(resp);
-    return resp;
+    return render(Error{status, std::move(message)});
 }
 
 // Un 422 de validacion lleva el detalle por campo. El `message` se mantiene
-// para que un cliente que solo lee `error.message` siga funcionando.
-inline drogon::HttpResponsePtr makeValidationError(const std::vector<FieldError>& fields) {
-    Json::Value body;
-    body["error"]["status"]  = 422;
-    body["error"]["message"] = "validation failed";
-
-    for (const auto& field : fields) {
-        Json::Value entry;
-        entry["field"]   = field.field;
-        entry["message"] = field.message;
-        body["error"]["fields"].append(std::move(entry));
-    }
-
-    auto resp = drogon::HttpResponse::newHttpJsonResponse(body);
-    resp->setStatusCode(drogon::k422UnprocessableEntity);
-    applyResponseChain(resp);
-    return resp;
+// para que un cliente que solo lee `error.message` siga funcionando, y pasa
+// por el mismo render que el resto: si hay un formato propio, este tambien.
+inline drogon::HttpResponsePtr makeValidationError(std::vector<FieldError> fields) {
+    return render(Error{.status  = 422,
+                        .message = "validation failed",
+                        .fields  = std::move(fields)});
 }
 
 template <typename T>
@@ -279,7 +252,7 @@ drogon::HttpResponsePtr makeOk(const T& value, int status) {
 template <typename T>
 void respond(const Callback& cb, const Result<T>& r, int okStatus) {
     if (!r.ok()) {
-        cb(makeError(r.error().status, r.error().message));
+        cb(render(r.error()));
         return;
     }
     cb(makeOk(r.value(), okStatus));
@@ -298,22 +271,37 @@ inline std::unordered_map<std::string, std::string>& routeAliases() {
     return aliases;
 }
 
+// "GET /api/v1/users/{id}" -> "users.show". Solo lo usa printRoutes().
+inline std::unordered_map<std::string, std::string>& aliasByRoute() {
+    static std::unordered_map<std::string, std::string> byRoute;
+    return byRoute;
+}
+
 }  // namespace detail
 
 // Lo que devuelve registrar una ruta. Su unico trabajo es dejarle un nombre
 // con el que construir la URL mas tarde, sin repetirla a mano.
 class Route {
 public:
-    explicit Route(std::string path) : path_{std::move(path)} {}
+    Route(std::string method, std::string path)
+        : method_{std::move(method)}, path_{std::move(path)} {}
 
     const Route& as(const std::string& alias) const {
         detail::routeAliases()[alias] = path_;
+
+        // El mismo path lo comparten hasta cinco metodos, asi que para saber
+        // de quien es un alias hace falta la pareja. El mapa de arriba se
+        // queda como esta: route("users.show", 7) construye una URL y para
+        // eso el metodo no pinta.
+        detail::aliasByRoute()[method_ + " " + path_] = alias;
         return *this;
     }
 
     const std::string& path() const { return path_; }
+    const std::string& method() const { return method_; }
 
 private:
+    std::string method_;
     std::string path_;
 };
 
@@ -370,23 +358,23 @@ class App {
 public:
     template <typename F> Route get(const std::string& path, F&& f) {
         route<false>(path, std::forward<F>(f), drogon::Get, 200);
-        return Route{path};
+        return Route{"GET", path};
     }
     template <typename F> Route post(const std::string& path, F&& f) {
         route<true>(path, std::forward<F>(f), drogon::Post, 201);
-        return Route{path};
+        return Route{"POST", path};
     }
     template <typename F> Route put(const std::string& path, F&& f) {
         route<true>(path, std::forward<F>(f), drogon::Put, 200);
-        return Route{path};
+        return Route{"PUT", path};
     }
     template <typename F> Route patch(const std::string& path, F&& f) {
         route<true>(path, std::forward<F>(f), drogon::Patch, 200);
-        return Route{path};
+        return Route{"PATCH", path};
     }
     template <typename F> Route del(const std::string& path, F&& f) {
         route<false>(path, std::forward<F>(f), drogon::Delete, 200);
-        return Route{path};
+        return Route{"DELETE", path};
     }
 
     // Registra bajo un prefijo comun: app.group("/api/v1").
@@ -451,6 +439,54 @@ public:
     // se cree que es.
     std::string openApi() const { return buildOpenApi(routes_, title_, version_); }
 
+    // Lo que hay registrado, sin levantar el servidor. Es lo primero que se
+    // busca al volver a un proyecto despues de un mes, y hasta ahora la unica
+    // forma de saberlo era leer routes.cpp.
+    //
+    // Se imprime en orden de ruta y no de registro: lo que se busca es "que
+    // hay bajo /users", no "que se registro primero".
+    void printRoutes() const {
+        if (routes_.empty() && sockets_.empty()) {
+            std::cout << "\n  no hay rutas registradas\n\n";
+            return;
+        }
+
+        std::vector<const RouteInfo*> ordenadas;
+        ordenadas.reserve(routes_.size());
+        for (const auto& route : routes_) ordenadas.push_back(&route);
+
+        std::sort(ordenadas.begin(), ordenadas.end(), [](const auto* a, const auto* b) {
+            if (a->path != b->path) return a->path < b->path;
+            return a->method < b->method;
+        });
+
+        std::cout << "\n";
+        for (const auto* route : ordenadas) {
+            auto metodo = route->method;
+            for (auto& c : metodo) c = static_cast<char>(std::toupper(c));
+
+            std::cout << std::format("  \033[32m{:<7}\033[0m {:<44}", metodo, route->path);
+
+            // El alias es lo que hace util a la tabla: es el nombre con el
+            // que se construye la URL desde el codigo, y no se ve en ningun
+            // otro sitio.
+            const auto alias = detail::aliasByRoute().find(metodo + " " + route->path);
+            if (alias != detail::aliasByRoute().end()) {
+                std::cout << " \033[90m" << alias->second << "\033[0m";
+            }
+            std::cout << "\n";
+        }
+
+        for (const auto& socket : sockets_) {
+            std::cout << std::format("  \033[36m{:<7}\033[0m {}\n", "WS", socket);
+        }
+
+        std::cout << "\n  " << routes_.size() << " rutas"
+                  << (sockets_.empty() ? std::string{}
+                                       : ", " + std::to_string(sockets_.size()) + " sockets")
+                  << "\n\n";
+    }
+
     App& cors(CorsOptions options = {}) {
         cors_ = std::move(options);
         return *this;
@@ -493,13 +529,22 @@ public:
         // El what() no viaja al cliente a proposito. Aqui decia "no such
         // table: users", que le describe el esquema a cualquiera que provoque
         // un error. Va al log, que es donde sirve.
+        //
+        // Antes de rendirse al 500, la excepcion pasa por los traductores que
+        // haya registrado la aplicacion con onException(): un UniqueViolation
+        // es un 409, y solo el proyecto sabe eso.
         drogon::app().setExceptionHandler(
             [](const std::exception& error, const drogon::HttpRequestPtr& request,
                std::function<void(const drogon::HttpResponsePtr&)>&& callback) {
                 LOG_ERROR << "excepcion sin atrapar en " << request->path() << ": "
                           << error.what();
-                callback(detail::makeError(500, "internal server error"));
+                callback(render(errorFrom(error)));
             });
+
+        // El request-id y el log de acceso van puestos de fabrica. Una
+        // trazabilidad que hay que acordarse de encender es la que no esta el
+        // dia que hace falta; para apagarla esta LOG_ACCESS=0.
+        log::install();
 
         // El banner se imprime cuando el listener ya esta arriba, no antes:
         // si el puerto esta ocupado no tiene sentido anunciar una URL que no
@@ -553,7 +598,7 @@ private:
                         if (!entry.prefix.empty() && !path.starts_with(entry.prefix)) continue;
 
                         if (const auto error = entry.fn(request)) {
-                            respond(detail::makeError(error->status, error->message));
+                            respond(render(*error));
                             return;
                         }
                     }
@@ -591,7 +636,7 @@ private:
                 resp->addHeader("Access-Control-Allow-Headers", headers);
                 resp->addHeader("Access-Control-Max-Age", maxAge);
                 if (credentials) resp->addHeader("Access-Control-Allow-Credentials", "true");
-                detail::applyResponseChain(resp);
+                applyResponseChain(resp);
 
                 respond(resp);
             });
@@ -653,7 +698,7 @@ private:
                 auto resp = drogon::HttpResponse::newHttpResponse();
                 resp->setContentTypeCode(drogon::CT_APPLICATION_JSON);
                 resp->setBody(spec);
-                detail::applyResponseChain(resp);
+                applyResponseChain(resp);
                 cb(resp);
             },
             {drogon::Get});
@@ -664,7 +709,7 @@ private:
                 auto resp = drogon::HttpResponse::newHttpResponse();
                 resp->setContentTypeCode(drogon::CT_TEXT_HTML);
                 resp->setBody(html);
-                detail::applyResponseChain(resp);
+                applyResponseChain(resp);
                 cb(resp);
             },
             {drogon::Get});

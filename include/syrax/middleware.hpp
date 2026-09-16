@@ -58,6 +58,29 @@ using Middleware = std::function<std::optional<Error>(Request&)>;
 // Para modificar la respuesta ya construida (cabeceras de seguridad, CORS).
 using ResponseMiddleware = std::function<void(const drogon::HttpResponsePtr&)>;
 
+namespace detail {
+
+// Drogon ya tiene renderizada la respuesta para cuando corren sus advices de
+// pre-sending, asi que addHeader() ahi no llega al cliente (se comprobo: el
+// advice dispara, la cabecera no sale). Por eso la cadena se aplica cuando
+// Syrax construye la respuesta, y no despues.
+//
+// Es estado global, que normalmente evitariamos; aqui es aceptable porque
+// drogon::app() ya es un singleton y solo hay una aplicacion por proceso.
+inline std::vector<ResponseMiddleware>& responseChain() {
+    static std::vector<ResponseMiddleware> chain;
+    return chain;
+}
+
+}  // namespace detail
+
+// Se aplica a TODA respuesta que sale del framework, incluidos los errores.
+// Que las cabeceras de seguridad y CORS no dependan de si alguien sobrescribio
+// el formato del error es justo el punto.
+inline void applyResponseChain(const drogon::HttpResponsePtr& response) {
+    for (const auto& fn : detail::responseChain()) fn(response);
+}
+
 struct CorsOptions {
     std::vector<std::string> origins{"*"};
     std::vector<std::string> methods{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"};

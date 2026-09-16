@@ -19,6 +19,8 @@ add_executable(syrax_tests
     query_test.cpp
     envport_test.cpp
     config_test.cpp
+    errors_test.cpp
+    log_test.cpp
     jobs_test.cpp
     ws_test.cpp
 )

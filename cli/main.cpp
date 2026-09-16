@@ -53,6 +53,10 @@ constexpr Alias kAliases[] = {
     {"work", "queue:work"},        {"q:w", "queue:work"},
     {"q:f", "queue:failed"},       {"q:r", "queue:retry"},
     {"t", "test"},
+    {"r", "routes"},
+    {"m:a", "make:api"},           {"m:c", "make:controller"},
+    {"m:s:v", "make:service"},     {"m:rp", "make:repository"},
+    {"m:j", "make:job"},           {"m:mg", "make:migration"},
     {"u", "upgrade"},              {"-u", "upgrade"},      {"--upgrade", "upgrade"},
     {"v", "version"},              {"-v", "version"},      {"--version", "version"},
     {"h", "help"},                 {"-h", "help"},         {"--help", "help"},
@@ -724,6 +728,246 @@ fs::path findOrBuildCtl() {
 // No se hace en `syrax new` a proposito: drogon_ctl lee el esquema de la base,
 // que en ese momento todavia no existe. Y son ~270 lineas por columna, que no
 // se le meten a nadie sin pedirlas.
+// -------------------------------------------------------------- generadores
+
+// Post -> post.  UserProfile -> userProfile.
+std::string lowerFirst(std::string text) {
+    if (!text.empty()) text[0] = static_cast<char>(std::tolower(text[0]));
+    return text;
+}
+
+// UserProfile -> user_profiles.  Plural ingenuo a proposito: acierta en la
+// mayoria y cuando no, el nombre de la tabla esta en un solo sitio y se
+// cambia a mano. Adivinar mejor exigiria un diccionario.
+std::string tableOf(const std::string& entity) {
+    std::string snake;
+    for (std::size_t i = 0; i < entity.size(); ++i) {
+        if (std::isupper(entity[i]) && i > 0) snake += '_';
+        snake += static_cast<char>(std::tolower(entity[i]));
+    }
+
+    if (snake.ends_with("y") && snake.size() > 1 && !std::string_view{"aeiou"}.contains(snake[snake.size() - 2])) {
+        return snake.substr(0, snake.size() - 1) + "ies";
+    }
+    if (snake.ends_with("s") || snake.ends_with("x") || snake.ends_with("ch") || snake.ends_with("sh")) {
+        return snake + "es";
+    }
+    return snake + "s";
+}
+
+// posts -> Posts.  user_profiles -> UserProfiles.
+std::string pascalOf(const std::string& snake) {
+    std::string out;
+    bool upper = true;
+    for (const char c : snake) {
+        if (c == '_') { upper = true; continue; }
+        out += upper ? static_cast<char>(std::toupper(c)) : c;
+        upper = false;
+    }
+    return out;
+}
+
+// SendInvoice -> send-invoice, que es el nombre con el que el job viaja en la
+// cola y sobrevive a un rename de la clase.
+std::string slugOf(const std::string& entity) {
+    std::string out;
+    for (std::size_t i = 0; i < entity.size(); ++i) {
+        if (std::isupper(entity[i]) && i > 0) out += '-';
+        out += static_cast<char>(std::tolower(entity[i]));
+    }
+    return out;
+}
+
+std::string fill(std::string_view tpl, const std::vector<std::pair<std::string_view, std::string>>& subs) {
+    std::string out{tpl};
+    for (const auto& [token, value] : subs) {
+        for (auto pos = out.find(token); pos != std::string::npos; pos = out.find(token, pos + value.size())) {
+            out.replace(pos, token.size(), value);
+        }
+    }
+    return out;
+}
+
+// Escribe si no existe. Un generador que pisa trabajo ajeno sin avisar es un
+// generador que nadie vuelve a usar.
+bool emit(const fs::path& path, const std::string& content, bool& any) {
+    if (fs::exists(path)) {
+        std::cout << "  \033[33momitido\033[0m  " << path.string() << "  (ya existe)\n";
+        return true;
+    }
+
+    fs::create_directories(path.parent_path());
+    if (!writeFile(path, content)) return false;
+
+    std::cout << "  \033[32mcreado\033[0m   " << path.string() << "\n";
+    any = true;
+    return true;
+}
+
+// Mete una linea en un archivo justo despues de un ancla, si no esta ya. Es
+// lo que evita el paso que todo el mundo olvida: registrar lo que acaba de
+// generar.
+bool insertAfter(const fs::path& path, const std::string& anchor, const std::string& line) {
+    if (!fs::exists(path)) return false;
+
+    std::ifstream in(path);
+    std::string   text{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+    in.close();
+
+    if (text.find(line) != std::string::npos) return true;
+
+    const auto pos = text.rfind(anchor);
+    if (pos == std::string::npos) return false;
+
+    const auto endOfLine = text.find('\n', pos);
+    if (endOfLine == std::string::npos) return false;
+
+    text.insert(endOfLine + 1, line + "\n");
+    return writeFile(path, text);
+}
+
+// El numero que le toca a la siguiente migracion, mirando las que hay.
+std::string nextMigrationNumber() {
+    int highest = 0;
+    const fs::path dir = "database/migrations";
+
+    if (fs::exists(dir)) {
+        for (const auto& entry : fs::directory_iterator(dir)) {
+            const auto stem = entry.path().filename().string();
+            if (stem.size() < 3) continue;
+
+            const auto prefix = stem.substr(0, 3);
+            if (!std::all_of(prefix.begin(), prefix.end(), [](char c) { return std::isdigit(c); })) continue;
+
+            highest = std::max(highest, std::stoi(prefix));
+        }
+    }
+
+    char buffer[8];
+    std::snprintf(buffer, sizeof buffer, "%03d", highest + 1);
+    return buffer;
+}
+
+int cmdMake(const std::string& kind, const std::string& rawName) {
+    if (!inProject()) return 1;
+
+    if (rawName.empty()) {
+        std::cerr << "uso: syrax make:" << kind << " <Nombre>\n";
+        return 1;
+    }
+
+    std::string entity = rawName;
+    entity[0] = static_cast<char>(std::toupper(entity[0]));
+
+    const std::string lower = lowerFirst(entity);
+    const std::string table = tableOf(entity);
+
+    const std::vector<std::pair<std::string_view, std::string>> subs = {
+        {"@E@", entity}, {"@e@", lower}, {"@es@", table}, {"@slug@", slugOf(entity)},
+    };
+
+    bool any = false;
+    bool ok  = true;
+
+    const auto layer = [&](std::string_view tpl, const std::string& path) {
+        ok = ok && emit(path, fill(tpl, subs), any);
+    };
+
+    std::cout << "\n";
+
+    if (kind == "model" || kind == "api") {
+        layer(tpl::kGenModel, "src/models/" + entity + "/" + entity + ".hpp");
+    }
+    if (kind == "request" || kind == "api") {
+        layer(tpl::kGenRequests, "src/http/requests/" + entity + "/" + entity + "Requests.hpp");
+    }
+    if (kind == "resource" || kind == "api") {
+        layer(tpl::kGenResourceH, "src/http/resources/" + entity + "/" + entity + "Resource.hpp");
+        layer(tpl::kGenResourceCpp, "src/http/resources/" + entity + "/" + entity + "Resource.cpp");
+    }
+    if (kind == "repository" || kind == "api") {
+        layer(tpl::kGenRepositoryH, "src/repositories/" + entity + "/" + entity + "Repository.hpp");
+        layer(tpl::kGenRepositoryCpp, "src/repositories/" + entity + "/" + entity + "Repository.cpp");
+    }
+    if (kind == "service" || kind == "api") {
+        layer(tpl::kGenServiceH, "src/services/" + entity + "/" + entity + "Service.hpp");
+        layer(tpl::kGenServiceCpp, "src/services/" + entity + "/" + entity + "Service.cpp");
+    }
+    if (kind == "controller" || kind == "api") {
+        layer(tpl::kGenControllerH, "src/http/controllers/" + entity + "/" + entity + "Controller.hpp");
+        layer(tpl::kGenControllerCpp, "src/http/controllers/" + entity + "/" + entity + "Controller.cpp");
+    }
+
+    if (kind == "job") {
+        layer(tpl::kGenJob, "src/jobs/" + entity + ".hpp");
+
+        // Un job sin registrar no corre nunca, y el sintoma es una cola que
+        // crece en silencio. Se registra aqui mismo.
+        if (ok && any) {
+            insertAfter("src/bootstrap/queue.cpp", "#include \"jobs/",
+                        "#include \"jobs/" + entity + ".hpp\"");
+            insertAfter("src/bootstrap/queue.cpp", "syrax::jobs::handle<",
+                        "    syrax::jobs::handle<" + entity + ">();");
+            std::cout << "  \033[32mregistrado\033[0m en src/bootstrap/queue.cpp\n";
+        }
+    }
+
+    if (kind == "migration") {
+        const auto number = nextMigrationNumber();
+        const auto file   = number + "_create_" + table;
+        const auto klass  = "Create" + pascalOf(table) + "Table";
+
+        const std::vector<std::pair<std::string_view, std::string>> migSubs = {
+            {"@E@", klass}, {"@es@", table}, {"@FILE@", file},
+        };
+
+        ok = emit("database/migrations/" + file + ".hpp", fill(tpl::kGenMigration, migSubs), any);
+
+        if (ok && any) {
+            insertAfter("database/migrations.cpp", "#include \"migrations/",
+                        "#include \"migrations/" + file + ".hpp\"");
+            insertAfter("database/migrations.cpp", "migrator.add<",
+                        "    migrator.add<" + klass + ">();");
+            std::cout << "  \033[32mregistrado\033[0m en database/migrations.cpp\n";
+        }
+    }
+
+    if (!ok) return 1;
+
+    if (kind == "api" || kind == "controller") {
+        std::cout << "\n  falta la ruta. En src/routes/v1.cpp:\n\n"
+                  << "    #include \"http/controllers/" << entity << "/" << entity << "Controller.hpp\"\n\n"
+                  << "    namespace " << lower << " = controllers::" << entity << "Controller;\n\n"
+                  << "    api.get(\"/" << table << "\", " << lower << "::index).as(\"" << table << ".index\");\n"
+                  << "    api.post(\"/" << table << "\", " << lower << "::store).as(\"" << table << ".store\");\n\n"
+                  << "    api.get(\"/" << table << "/{id}\", " << lower << "::show).as(\"" << table << ".show\");\n"
+                  << "    api.put(\"/" << table << "/{id}\", " << lower << "::update).as(\"" << table << ".update\");\n"
+                  << "    api.del(\"/" << table << "/{id}\", " << lower << "::destroy).as(\"" << table << ".destroy\");\n";
+    }
+
+    std::cout << "\n";
+    return 0;
+}
+
+// Lo que hay registrado, sin levantar el servidor.
+int cmdRoutes() {
+    if (const int rc = cmdBuild(); rc != 0) return rc;
+
+    const auto name = projectName();
+    if (name.empty()) {
+        std::cerr << "error: no pude leer project(...) de CMakeLists.txt\n";
+        return 1;
+    }
+
+    const fs::path bin = fs::path("build") / name;
+    if (!fs::exists(bin)) {
+        std::cerr << "error: no encontre el binario en " << bin << "\n";
+        return 1;
+    }
+
+    return run("./" + bin.string() + " routes");
+}
+
 int cmdMakeModel(const std::string& table) {
     if (!inProject()) return 1;
 
@@ -804,6 +1048,13 @@ int usage() {
         "  new <nombre> [--db postgres|mysql|sqlite]  n  crea un proyecto\n"
         "  build                                 b    configura y compila\n"
         "  serve [--port N] [--no-watch]         s    levanta y recompila al guardar; q sale\n"
+        "  routes                                r    lista las rutas registradas\n"
+        "\n"
+        "  make:api <Nombre>                     m:a  las seis capas de un recurso\n"
+        "  make:controller|service|repository <Nombre>  una sola capa\n"
+        "  make:resource|request|entity <Nombre>        una sola capa\n"
+        "  make:job <Nombre>                     m:j  un job, ya registrado\n"
+        "  make:migration <Nombre>               m:mg una migracion, ya registrada\n"
         "\n"
         "  migrate                               m    aplica las migraciones pendientes\n"
         "  migrate:rollback                      m:r  revierte la ultima\n"
@@ -877,6 +1128,19 @@ int main(int argc, char** argv) {
     if (cmd == "make:model" || cmd == "m:m") {
         return cmdMakeModel(argc > 2 ? argv[2] : "");
     }
+
+    // Las capas se generan una a una, o todas de golpe con make:api. Que el
+    // CLI sepa escribirlas es lo que hace que la arquitectura del README se
+    // siga en el tercer endpoint y no solo en el primero.
+    for (const auto& kind : {"api", "controller", "service", "repository",
+                             "resource", "request", "entity", "job", "migration"}) {
+        if (cmd == std::string{"make:"} + kind) {
+            return cmdMake(kind == std::string{"entity"} ? "model" : kind,
+                           argc > 2 ? argv[2] : "");
+        }
+    }
+
+    if (cmd == "routes")           return cmdRoutes();
     if (cmd == "test")             return cmdTest();
     if (cmd == "upgrade")          return cmdUpgrade();
     if (cmd == "help")             return usage();

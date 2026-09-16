@@ -180,6 +180,16 @@ REDIS_HOST=127.0.0.1
 REDIS_PORT=6379
 REDIS_PASSWORD=
 REDIS_DB=0
+
+# El limite por IP y por minuto, y quien puede llamarte desde un navegador.
+RATE_LIMIT=120
+CORS_ORIGINS=*
+CORS_CREDENTIALS=false
+
+# text con terminal, json detras de un pipe. LOG_ACCESS=0 apaga la linea
+# por peticion.
+LOG_LEVEL=info
+LOG_ACCESS=1
 )T";
 
 inline constexpr std::string_view kEnvMysql = R"T(# Puerto donde escucha la app. Un argumento en la linea de comandos lo pisa.
@@ -213,6 +223,16 @@ REDIS_HOST=127.0.0.1
 REDIS_PORT=6379
 REDIS_PASSWORD=
 REDIS_DB=0
+
+# El limite por IP y por minuto, y quien puede llamarte desde un navegador.
+RATE_LIMIT=120
+CORS_ORIGINS=*
+CORS_CREDENTIALS=false
+
+# text con terminal, json detras de un pipe. LOG_ACCESS=0 apaga la linea
+# por peticion.
+LOG_LEVEL=info
+LOG_ACCESS=1
 )T";
 
 inline constexpr std::string_view kEnvSqlite = R"T(# Puerto donde escucha la app. Un argumento en la linea de comandos lo pisa.
@@ -237,6 +257,16 @@ REDIS_HOST=127.0.0.1
 REDIS_PORT=6379
 REDIS_PASSWORD=
 REDIS_DB=0
+
+# El limite por IP y por minuto, y quien puede llamarte desde un navegador.
+RATE_LIMIT=120
+CORS_ORIGINS=*
+CORS_CREDENTIALS=false
+
+# text con terminal, json detras de un pipe. LOG_ACCESS=0 apaga la linea
+# por peticion.
+LOG_LEVEL=info
+LOG_ACCESS=1
 )T";
 
 inline constexpr std::string_view kCompose = R"T(# docker compose lee el .env de este directorio, asi que DB_PORT es la unica
@@ -319,6 +349,8 @@ inline constexpr std::string_view kBootstrapCpp = R"T(#include "bootstrap/app.hp
 
 #include "bootstrap/cache.hpp"
 #include "bootstrap/database.hpp"
+#include "bootstrap/errors.hpp"
+#include "bootstrap/middleware.hpp"
 #include "bootstrap/queue.hpp"
 #include "routes/routes.hpp"
 
@@ -333,6 +365,7 @@ syrax::App create() {
         drogon::app().loadConfigFile("config/app.json");
     }
 
+    errors();
     database();
     cache();
     queue();
@@ -342,6 +375,7 @@ syrax::App create() {
     app.docs(syrax::env("APP_NAME", "@NAME@"), syrax::env("APP_VERSION", "1.0.0"));
     app.base(syrax::env("API_BASE", "/api/v1"));
 
+    middleware(app);
     registerRoutes(app);
     return app;
 }
@@ -409,6 +443,399 @@ void cache() {
         .password    = syrax::env("REDIS_PASSWORD", ""),
         .database    = static_cast<unsigned int>(syrax::envInt("REDIS_DB", 0)),
         .connections = static_cast<std::size_t>(syrax::envInt("REDIS_POOL", 1)),
+    });
+}
+
+}  // namespace bootstrap
+)T";
+
+// ------------------------------------------------------------- generadores
+//
+// Lo que escriben `syrax make:<capa>` y `syrax make:api`. Tokens: @E@ es la
+// entidad en PascalCase (Post), @e@ en minuscula (post) y @es@ la tabla
+// (posts).
+
+inline constexpr std::string_view kGenModel = R"T(#pragma once
+
+#include <cstdint>
+#include <string>
+
+namespace models {
+
+struct @E@ {
+    std::int64_t id = 0;
+    std::string  name;
+
+    static constexpr auto table = "@es@";
+};
+
+}  // namespace models
+)T";
+
+inline constexpr std::string_view kGenRequests = R"T(#pragma once
+
+#include <syrax/syrax.hpp>
+
+#include <string>
+
+namespace requests {
+
+struct Create@E@ {
+    std::string name;
+
+    static auto rules() {
+        return syrax::rules(syrax::field(&Create@E@::name).notEmpty().maxLen(120));
+    }
+};
+
+struct Update@E@ {
+    std::string name;
+
+    static auto rules() {
+        return syrax::rules(syrax::field(&Update@E@::name).notEmpty().maxLen(120));
+    }
+};
+
+}  // namespace requests
+)T";
+
+inline constexpr std::string_view kGenResourceH = R"T(#pragma once
+
+#include "http/resources/DeletedResource.hpp"
+#include "models/@E@/@E@.hpp"
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace resources {
+
+struct @E@Resource {
+    std::int64_t id = 0;
+    std::string  name;
+};
+
+@E@Resource from(const models::@E@& @e@);
+
+std::vector<@E@Resource> from(const std::vector<models::@E@>& @e@s);
+
+}  // namespace resources
+)T";
+
+inline constexpr std::string_view kGenResourceCpp = R"T(#include "http/resources/@E@/@E@Resource.hpp"
+
+namespace resources {
+
+@E@Resource from(const models::@E@& @e@) {
+    return @E@Resource{
+        .id   = @e@.id,
+        .name = @e@.name,
+    };
+}
+
+std::vector<@E@Resource> from(const std::vector<models::@E@>& @e@s) {
+    std::vector<@E@Resource> out;
+    out.reserve(@e@s.size());
+    for (const auto& @e@ : @e@s) out.push_back(from(@e@));
+    return out;
+}
+
+}  // namespace resources
+)T";
+
+inline constexpr std::string_view kGenRepositoryH = R"T(#pragma once
+
+#include <syrax/syrax.hpp>
+
+#include "models/@E@/@E@.hpp"
+
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <vector>
+
+namespace repositories {
+
+namespace @E@Repository {
+syrax::Task<std::vector<models::@E@>>   all();
+syrax::Task<std::optional<models::@E@>> find(std::int64_t id);
+syrax::Task<models::@E@>                create(std::string name);
+syrax::Task<std::optional<models::@E@>> update(std::int64_t id, std::string name);
+syrax::Task<bool>                       remove(std::int64_t id);
+
+}  // namespace @E@Repository
+}  // namespace repositories
+)T";
+
+inline constexpr std::string_view kGenRepositoryCpp = R"T(#include "repositories/@E@/@E@Repository.hpp"
+
+using namespace syrax;
+
+namespace repositories::@E@Repository {
+
+Task<std::vector<models::@E@>> all() {
+    co_return co_await Query<models::@E@>().orderBy(&models::@E@::id).get();
+}
+
+Task<std::optional<models::@E@>> find(std::int64_t id) {
+    co_return co_await Query<models::@E@>().where(&models::@E@::id, "=", id).first();
+}
+
+Task<models::@E@> create(std::string name) {
+    models::@E@ @e@{.name = std::move(name)};
+    co_await save(@e@);
+    co_return @e@;
+}
+
+Task<std::optional<models::@E@>> update(std::int64_t id, std::string name) {
+    const auto changed = co_await Query<models::@E@>()
+                             .where(&models::@E@::id, "=", id)
+                             .set(&models::@E@::name, std::move(name))
+                             .update();
+
+    if (changed == 0) co_return std::nullopt;
+    co_return co_await find(id);
+}
+
+Task<bool> remove(std::int64_t id) {
+    co_return (co_await Query<models::@E@>().where(&models::@E@::id, "=", id).del()) > 0;
+}
+
+}  // namespace repositories::@E@Repository
+)T";
+
+inline constexpr std::string_view kGenServiceH = R"T(#pragma once
+
+#include <syrax/syrax.hpp>
+
+#include "models/@E@/@E@.hpp"
+#include "http/requests/@E@/@E@Requests.hpp"
+
+#include <cstdint>
+#include <optional>
+#include <vector>
+
+namespace services {
+
+namespace @E@Service {
+syrax::Task<std::vector<models::@E@>>   list();
+syrax::Task<std::optional<models::@E@>> byId(std::int64_t id);
+
+syrax::Task<models::@E@>                create(requests::Create@E@ input);
+syrax::Task<std::optional<models::@E@>> update(std::int64_t id, requests::Update@E@ input);
+syrax::Task<bool>                       remove(std::int64_t id);
+
+}  // namespace @E@Service
+}  // namespace services
+)T";
+
+inline constexpr std::string_view kGenServiceCpp = R"T(#include "services/@E@/@E@Service.hpp"
+
+#include "repositories/@E@/@E@Repository.hpp"
+
+using namespace syrax;
+
+namespace services::@E@Service {
+
+namespace repo = repositories::@E@Repository;
+
+Task<std::vector<models::@E@>> list() {
+    co_return co_await repo::all();
+}
+
+Task<std::optional<models::@E@>> byId(std::int64_t id) {
+    co_return co_await repo::find(id);
+}
+
+Task<models::@E@> create(requests::Create@E@ input) {
+    co_return co_await repo::create(std::move(input.name));
+}
+
+Task<std::optional<models::@E@>> update(std::int64_t id, requests::Update@E@ input) {
+    co_return co_await repo::update(id, std::move(input.name));
+}
+
+Task<bool> remove(std::int64_t id) {
+    co_return co_await repo::remove(id);
+}
+
+}  // namespace services::@E@Service
+)T";
+
+inline constexpr std::string_view kGenControllerH = R"T(#pragma once
+
+#include <syrax/syrax.hpp>
+
+#include "http/requests/@E@/@E@Requests.hpp"
+#include "http/resources/@E@/@E@Resource.hpp"
+
+#include <cstdint>
+#include <vector>
+
+namespace controllers::@E@Controller {
+
+syrax::Task<syrax::Result<std::vector<resources::@E@Resource>>> index();
+
+syrax::Task<syrax::Result<resources::@E@Resource>> show(std::int64_t id);
+
+syrax::Task<syrax::Result<resources::@E@Resource>> store(requests::Create@E@ body);
+
+syrax::Task<syrax::Result<resources::@E@Resource>> update(std::int64_t id,
+                                                          requests::Update@E@ body);
+
+syrax::Task<syrax::Result<resources::DeletedResource>> destroy(std::int64_t id);
+
+}  // namespace controllers::@E@Controller
+)T";
+
+inline constexpr std::string_view kGenControllerCpp = R"T(#include "http/controllers/@E@/@E@Controller.hpp"
+
+#include "services/@E@/@E@Service.hpp"
+
+using namespace syrax;
+
+namespace controllers::@E@Controller {
+
+namespace service = services::@E@Service;
+
+Task<Result<std::vector<resources::@E@Resource>>> index() {
+    co_return resources::from(co_await service::list());
+}
+
+Task<Result<resources::@E@Resource>> show(std::int64_t id) {
+    const auto @e@ = co_await service::byId(id);
+    if (!@e@) co_return NotFound("@e@ not found").as("@e@_no_encontrado");
+
+    co_return resources::from(*@e@);
+}
+
+Task<Result<resources::@E@Resource>> store(requests::Create@E@ body) {
+    co_return resources::from(co_await service::create(std::move(body)));
+}
+
+Task<Result<resources::@E@Resource>> update(std::int64_t id, requests::Update@E@ body) {
+    const auto @e@ = co_await service::update(id, std::move(body));
+    if (!@e@) co_return NotFound("@e@ not found").as("@e@_no_encontrado");
+
+    co_return resources::from(*@e@);
+}
+
+Task<Result<resources::DeletedResource>> destroy(std::int64_t id) {
+    if (!co_await service::remove(id)) co_return NotFound("@e@ not found").as("@e@_no_encontrado");
+
+    co_return resources::DeletedResource{.id = id, .deleted = true};
+}
+
+}  // namespace controllers::@E@Controller
+)T";
+
+inline constexpr std::string_view kGenJob = R"T(#pragma once
+
+#include <syrax/syrax.hpp>
+
+#include <iostream>
+#include <string>
+
+struct @E@ {
+    std::string payload;
+
+    static constexpr auto name  = "@slug@";
+    static constexpr int  tries = 3;
+
+    syrax::Task<void> handle() const {
+        std::cout << "  " << payload;
+        co_return;
+    }
+};
+)T";
+
+inline constexpr std::string_view kGenMigration = R"T(#pragma once
+
+#include <syrax/syrax.hpp>
+
+#include <string>
+
+struct @E@ : syrax::Migration {
+    std::string name() const override { return "@FILE@"; }
+
+    void up(syrax::Schema& schema) override {
+        schema.create("@es@", [](syrax::Blueprint& table) {
+            table.id();
+            table.string("name");
+            table.timestamps();
+        });
+    }
+
+    void down(syrax::Schema& schema) override {
+        schema.drop("@es@");
+    }
+};
+)T";
+
+inline constexpr std::string_view kBootstrapMiddlewareH = R"T(#pragma once
+
+namespace syrax { class App; }
+
+namespace bootstrap {
+
+void middleware(syrax::App& app);
+
+}  // namespace bootstrap
+)T";
+
+inline constexpr std::string_view kBootstrapMiddlewareCpp = R"T(#include "bootstrap/middleware.hpp"
+
+#include <syrax/syrax.hpp>
+
+#include <chrono>
+
+namespace bootstrap {
+
+void middleware(syrax::App& app) {
+    app.cors({
+        .origins     = {syrax::env("CORS_ORIGINS", "*")},
+        .credentials = syrax::envBool("CORS_CREDENTIALS", false),
+    });
+
+    app.useOnResponse(syrax::securityHeaders());
+
+    app.use(syrax::rateLimit(syrax::envInt("RATE_LIMIT", 120), std::chrono::minutes{1}));
+}
+
+}  // namespace bootstrap
+)T";
+
+inline constexpr std::string_view kBootstrapErrorsH = R"T(#pragma once
+
+namespace bootstrap {
+
+void errors();
+
+}  // namespace bootstrap
+)T";
+
+inline constexpr std::string_view kBootstrapErrorsCpp = R"T(#include "bootstrap/errors.hpp"
+
+#include <syrax/syrax.hpp>
+
+#include <drogon/orm/Exception.h>
+
+#include <exception>
+#include <optional>
+
+namespace bootstrap {
+
+void errors() {
+    syrax::onException([](const std::exception& thrown) -> std::optional<syrax::Error> {
+        if (dynamic_cast<const drogon::orm::UniqueViolation*>(&thrown)) {
+            return syrax::Conflict("el recurso ya existe").as("duplicado");
+        }
+
+        if (dynamic_cast<const drogon::orm::ForeignKeyViolation*>(&thrown)) {
+            return syrax::BadRequest("referencia inexistente").as("referencia_invalida");
+        }
+
+        return std::nullopt;
     });
 }
 
@@ -1082,6 +1509,16 @@ int main(int argc, char** argv) {
         return migrations(arg);
     }
 
+    if (arg == "routes") {
+        try {
+            bootstrap::create().printRoutes();
+        } catch (const std::exception& e) {
+            std::cerr << "\nerror: " << e.what() << "\n\n";
+            return 1;
+        }
+        return 0;
+    }
+
     if (arg == "queue:work" || arg == "queue:failed" || arg == "queue:retry") {
         try {
             auto app = bootstrap::create();
@@ -1229,8 +1666,23 @@ struct UpdateUser {
 
 // =========================================================== resources/
 
+inline constexpr std::string_view kResourceDeleted = R"T(#pragma once
+
+#include <cstdint>
+
+namespace resources {
+
+struct DeletedResource {
+    std::int64_t id;
+    bool         deleted;
+};
+
+}  // namespace resources
+)T";
+
 inline constexpr std::string_view kResourceUserH = R"T(#pragma once
 
+#include "http/resources/DeletedResource.hpp"
 #include "models/User/User.hpp"
 
 #include <cstdint>
@@ -1243,11 +1695,6 @@ struct UserResource {
     std::int64_t id;
     std::string  name;
     std::string  email;
-};
-
-struct DeletedResource {
-    std::int64_t id;
-    bool         deleted;
 };
 
 UserResource              from(const models::User& user);
@@ -1545,6 +1992,10 @@ inline constexpr File kProjectFiles[] = {
     {"src/bootstrap/app.cpp",                    kBootstrapCpp},
     {"src/bootstrap/database.hpp",               kBootstrapDatabaseH},
     {"src/bootstrap/database.cpp",               kBootstrapDatabaseCpp},
+    {"src/bootstrap/errors.hpp",                 kBootstrapErrorsH},
+    {"src/bootstrap/errors.cpp",                 kBootstrapErrorsCpp},
+    {"src/bootstrap/middleware.hpp",             kBootstrapMiddlewareH},
+    {"src/bootstrap/middleware.cpp",             kBootstrapMiddlewareCpp},
     {"src/bootstrap/cache.hpp",                  kBootstrapCacheH},
     {"src/bootstrap/cache.cpp",                  kBootstrapCacheCpp},
     {"src/bootstrap/queue.hpp",                  kBootstrapQueueH},
@@ -1557,6 +2008,7 @@ inline constexpr File kProjectFiles[] = {
 
     {"src/models/User/User.hpp",                 kModelUser},
     {"src/http/requests/User/UserRequests.hpp",  kRequestsUser},
+    {"src/http/resources/DeletedResource.hpp",   kResourceDeleted},
     {"src/http/resources/User/UserResource.hpp", kResourceUserH},
     {"src/http/resources/User/UserResource.cpp", kResourceUserCpp},
     {"src/repositories/User/UserRepository.hpp", kRepoUserH},

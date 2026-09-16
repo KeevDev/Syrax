@@ -1,5 +1,6 @@
 # Syrax
-![Uploading image.png…]()
+<img width="1024" height="205" alt="image" src="https://github.com/user-attachments/assets/10dd0bb6-a67f-4460-b5c8-ecc87ad57838" />
+
 
 **Un framework de APIs para C++ moderno.** Construido sobre [Drogon](https://github.com/drogonframework/drogon) (HTTP) y [Glaze](https://github.com/stephenberry/glaze) (tipos y JSON).
 

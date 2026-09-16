@@ -146,6 +146,10 @@ TEST_CASE_METHOD(Fixture, "cada path despacha a sus propios handlers", "[ws]") {
 }
 
 TEST_CASE_METHOD(Fixture, "un socket cerrado sale del room", "[ws]") {
+    // El tamano se mide CON el socket dentro, no despues de cerrarlo: si el
+    // servidor alcanza a procesar el cierre antes de la medicion, el numero de
+    // referencia ya viene descontado y la comprobacion no puede cumplirse.
+    std::size_t conectado = 0;
     {
         Client temporal;
         REQUIRE(temporal.connect("/room"));
@@ -154,17 +158,18 @@ TEST_CASE_METHOD(Fixture, "un socket cerrado sale del room", "[ws]") {
         while (testsrv::room().size() == 0 && std::chrono::steady_clock::now() < deadline) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
-        CHECK(testsrv::room().size() >= 1);
+
+        conectado = testsrv::room().size();
+        REQUIRE(conectado >= 1);
     }
 
     // Al cerrarse el socket, onClose tiene que haberlo sacado: si no, el Room
     // acumula conexiones muertas para siempre.
-    const auto before   = testsrv::room().size();
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    while (testsrv::room().size() >= before && std::chrono::steady_clock::now() < deadline) {
+    while (testsrv::room().size() >= conectado && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    CHECK(testsrv::room().size() < before);
+    CHECK(testsrv::room().size() < conectado);
 }
 
 TEST_CASE_METHOD(Fixture, "onClose corre al desconectar", "[ws]") {

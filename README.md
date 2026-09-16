@@ -11,7 +11,7 @@ api.post("/users", user::store).as("users.store");
 
 ```cpp
 // http/controllers/User/UserController.cpp — que hace la accion
-Task<Result<UserResource>> store(requests::CreateUser body) {
+Task<Result<resources::UserResource>> store(requests::CreateUser body) {
     const auto user = co_await service::create(std::move(body));
     if (!user) co_return Conflict("email already registered");
 
@@ -20,6 +20,8 @@ Task<Result<UserResource>> store(requests::CreateUser body) {
 ```
 
 Eso es un endpoint completo: parseo del body, validación, manejo de errores, serialización de la respuesta y documentación OpenAPI. Sin macros, sin heredar de nada, sin anotaciones.
+
+De ahí para adentro hay un servicio y un repositorio, cada uno con su trabajo: el recorrido entero está en [el camino de una petición](#el-camino-de-una-petición).
 
 > **Estado: funcional, pre-1.0.** El CRUD, la validación, las migraciones, la base de datos, los WebSockets y OpenAPI funcionan y están cubiertos por tests. La API puede cambiar sin aviso hasta la 1.0.
 
@@ -74,9 +76,27 @@ La primera compilación tarda unos minutos porque baja y compila Drogon; las sig
 
 ## Qué trae
 
-### Rutas y controladores
+### El camino de una petición
 
-El mapa de la API vive en `routes/`. Una línea por endpoint: la ruta, el método del controlador que la atiende y, si quieres, un alias.
+Un endpoint no es un archivo: es una cadena de capas, cada una con un trabajo y un tipo distinto. Esto es `POST /users` entero, de la URL a la tabla y de vuelta.
+
+```
+POST /users   {"name":"Ada","email":"ada@example.com","age":36}
+      │
+      ├─ routes/v1.cpp           la URL, y que metodo la atiende
+      ├─ requests/CreateUser     se parsea y se valida  ──>  422, y aqui se acaba
+      ├─ controllers/User        elige el codigo HTTP
+      ├─ services/UserService    la regla de negocio
+      ├─ repositories/User       el SQL  ──>  models::User
+      └─ resources/UserResource  lo que sale, sin campos privados
+      │
+      ▼
+201   {"id":1,"name":"Ada","email":"ada@example.com"}
+```
+
+Cada paso, con su archivo.
+
+**1. La ruta** dice qué expone la API y quién la atiende. Nada más.
 
 ```cpp
 // src/routes/v1.cpp
@@ -90,34 +110,119 @@ void register_(syrax::Group api) {
 }
 ```
 
-El controlador son funciones normales, y **la firma es el contrato**: Syrax deduce de ella qué parsear, qué validar y qué documentar.
+**2. El request** es lo que entra, y declara sus propias reglas. Si el JSON no cuadra, el cliente recibe un **422** y el controlador **no llega a correr**.
 
 ```cpp
-// src/http/controllers/User/UserController.hpp
-namespace controllers::UserController {
+// src/http/requests/User/UserRequests.hpp
+struct CreateUser {
+    std::string name;
+    std::string email;
+    int         age;
 
-Task<Result<std::vector<resources::UserResource>>> index();
-Task<Result<resources::UserResource>>              show(std::int64_t id);
-Task<Result<resources::UserResource>>              store(requests::CreateUser body);
-Task<Result<resources::UserResource>>              update(std::int64_t id,
-                                                          requests::UpdateUser body);
-Task<Result<resources::DeletedResource>>           destroy(std::int64_t id);
-
-}  // namespace controllers::UserController
+    static auto rules() {
+        return syrax::rules(
+            syrax::field(&CreateUser::name).notEmpty().minLen(2).maxLen(80),
+            syrax::field(&CreateUser::email).email(),
+            syrax::field(&CreateUser::age).range(0, 130));
+    }
+};
 ```
 
-Sin argumentos, con path param tipado, con body JSON, o con los dos: **el body es siempre el último argumento**. Pueden ser síncronos (`Result<T>`) o corrutinas (`Task<Result<T>>`). Ni la ruta ni el controlador se enteran del otro más de lo necesario: cambiar la URL o versionar la API no toca una línea del controlador.
+**3. El controlador** es la única capa que habla HTTP. Llama al servicio y traduce lo que recibe a un código de estado; no tiene lógica propia.
 
-De ahí para adentro el flujo es el que todo el mundo reconoce, y ninguna de esas capas la conoce el framework — son archivos C++ normales:
+```cpp
+// src/http/controllers/User/UserController.cpp
+Task<Result<resources::UserResource>> store(requests::CreateUser body) {
+    const auto user = co_await service::create(std::move(body));
+    if (!user) co_return Conflict("email already registered");
+
+    co_return resources::from(*user);
+}
+
+Task<Result<resources::UserResource>> show(std::int64_t id) {
+    const auto user = co_await service::byId(id);
+    if (!user) co_return NotFound("user not found");
+
+    co_return resources::from(*user);
+}
+```
+
+**La firma es el contrato.** De ahí saca Syrax qué parsear, qué validar y qué documentar: sin argumentos, con path param tipado, con body, o con los dos —**el body siempre al final**—. Pueden ser síncronos (`Result<T>`) o corrutinas (`Task<Result<T>>`).
+
+**4. El servicio** es la regla de negocio, y no sabe que existe HTTP: devuelve un `optional`, no un 404.
+
+```cpp
+// src/services/User/UserService.cpp
+Task<std::optional<models::User>> create(requests::CreateUser input) {
+    co_return co_await repo::createIfEmailFree(std::move(input.name),
+                                               std::move(input.email), input.age);
+}
+```
+
+Esa es la razón de que exista: el `nullopt` de arriba puede significar 409 en una API y otra cosa en un comando de consola. Quien decide es el controlador.
+
+**5. El repositorio** es el único que toca la base. SQL a mano o query builder, como prefieras:
+
+```cpp
+// src/repositories/User/UserRepository.cpp
+Task<std::vector<models::User>> all() {
+    co_return co_await syrax::Query<models::User>().orderBy(&models::User::id).get();
+}
+
+Task<std::optional<models::User>> createIfEmailFree(std::string name, std::string email, int age) {
+    co_return co_await syrax::db::transaction(
+        [=](const syrax::db::Tx& tx) -> Task<std::optional<models::User>> {
+            if (co_await syrax::Query<models::User>(tx.client())
+                    .where(&models::User::email, "=", email).exists()) {
+                co_return std::nullopt;
+            }
+
+            models::User nuevo{.id = 0, .name = name, .email = email, .age = age};
+            co_await syrax::save(nuevo, tx.client());
+            co_return nuevo;
+        });
+}
+```
+
+**6. El modelo y el resource** son dos tipos distintos a propósito: uno es la tabla, el otro es lo que sale por el cable.
+
+```cpp
+// src/models/User/User.hpp
+struct User {
+    std::int64_t id;
+    std::string  name;
+    std::string  email;
+    int          age;
+
+    static constexpr auto table = "users";
+};
+```
+
+```cpp
+// src/http/resources/User/UserResource.hpp
+struct UserResource {
+    std::int64_t id;
+    std::string  name;
+    std::string  email;          // sin age, y sin passwordHash el dia que lo agregues
+};
+```
+
+Un campo privado no puede filtrarse por accidente, porque el tipo que se serializa simplemente no lo tiene.
+
+---
+
+Así queda la cadena completa, y **ninguno de esos nombres los conoce el framework**: son archivos y funciones de C++ normales que puedes renombrar o borrar.
 
 ```
 routes/  ->  http/controllers/  ->  services/  ->  repositories/  ->  models/
 la URL       el transporte          el negocio     el SQL            la tabla
 ```
 
-`syrax new` lo deja montado con un CRUD completo dentro; está explicado entero en [estructura de un proyecto](#estructura-de-un-proyecto).
+`syrax new` lo deja montado con este CRUD dentro, listo para copiar y seguir; el porqué de cada frontera está en [estructura de un proyecto](#estructura-de-un-proyecto).
 
-**Para algo de una línea, la lambda sigue valiendo.** Un `/health` no necesita cuatro archivos:
+**Para agregar un endpoint nuevo** el orden es el mismo de arriba: la ruta, el request si entra JSON, el método en el controlador, y hacia adentro solo lo que falte. Muchas veces el servicio ya sabe hacer lo que necesitas y no hay que bajar hasta el repositorio.
+
+**Para algo de una línea, la lambda sigue valiendo.** Un `/health` no necesita una cadena de seis capas:
 
 ```cpp
 app.get("/health", []() -> Result<Status> { return Status{.status = "ok"}; });
@@ -640,7 +745,7 @@ tests/
 └── user_test.cpp         un test de verdad, para copiar y seguir
 ```
 
-**Por qué la ruta no vive en el controlador:** `routes/v1.cpp` se lee de un vistazo y dice qué expone esta versión de la API; el controlador dice qué hace cada acción. Cómo se escriben los dos está arriba, en [rutas y controladores](#rutas-y-controladores); aquí solo falta de dónde sale el prefijo, que es de la configuración:
+**Por qué la ruta no vive en el controlador:** `routes/v1.cpp` se lee de un vistazo y dice qué expone esta versión de la API; el controlador dice qué hace cada acción. Cómo se escriben las dos está arriba, en [el camino de una petición](#el-camino-de-una-petición); aquí solo falta de dónde sale el prefijo, que es de la configuración:
 
 ```cpp
 // routes/routes.cpp — la base se declara en bootstrap, aqui solo se usa

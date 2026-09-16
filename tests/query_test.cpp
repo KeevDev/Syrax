@@ -47,6 +47,12 @@ struct Invoice {
 class TempDb {
 public:
     TempDb() : path_{fs::temp_directory_path() / name()} {
+        // Un proceso anterior con este mismo pid pudo morir sin limpiar. Abrir
+        // encima de su archivo dejaria las filas de los dos, y el test falla
+        // una vez cada muchas sin explicacion.
+        std::error_code ec;
+        fs::remove(path_, ec);
+
         client_ = drogon::orm::DbClient::newSqlite3Client("filename=" + path_.string(), 1);
 
         client_->execSqlSync(

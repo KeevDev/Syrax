@@ -15,6 +15,16 @@ struct Post        { std::int64_t id; std::string authorId; };
 struct UpdatePost  { std::string title; };
 struct PostResource{ std::int64_t id; std::string title; };
 
+struct SendWelcome {
+    std::int64_t userId = 0;
+    std::string  email;
+
+    static constexpr auto name  = "send-welcome";
+    static constexpr int  tries = 3;
+
+    Task<void> handle() const { co_return; }
+};
+
 namespace policies {
 std::optional<Error> update(const Actor& actor, const Post& post) {
     if (actor.is("admin"))         return std::nullopt;
@@ -130,6 +140,9 @@ int main() {
     app.post("/posts/{id}", controllers::update);
 
     app.base(syrax::env("API_BASE", "/api/v1"));
+
+    jobs::connect({.driver = syrax::env("QUEUE_DRIVER", "database")});
+    jobs::handle<SendWelcome>();
 
     db::connect({
         .engine      = syrax::env("DB_ENGINE", "postgres"),

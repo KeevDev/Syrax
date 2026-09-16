@@ -629,6 +629,78 @@ El valor viaja como JSON, así que sirve para cualquier struct que el resto del 
 
 `cache::client()` da el `RedisClient` de Drogon para todo lo demás. Pedirlo antes de `app.run()` lanza con un mensaje en vez de un segfault: Drogon crea sus clientes al arrancar.
 
+### Colas de trabajos
+
+Mandar un correo, rehacer un informe o llamar a una API ajena no tiene por qué pasar dentro de la petición. Un job es un struct plano con `handle()`:
+
+```cpp
+// src/jobs/SendWelcome.hpp
+struct SendWelcome {
+    std::int64_t userId = 0;
+    std::string  email;
+
+    static constexpr auto name  = "send-welcome";
+    static constexpr int  tries = 3;
+
+    syrax::Task<void> handle() const {
+        co_await mail::send(email, "Bienvenida");
+    }
+};
+```
+
+Lo que viaja por la cola es su JSON, que Glaze ya sabe escribir y leer: no hay nada que declarar. Se despacha desde donde haga falta —normalmente el servicio— y se ejecuta después:
+
+```cpp
+co_await jobs::dispatch(SendWelcome{.userId = user->id, .email = user->email});
+co_await jobs::dispatch(SendWelcome{...}, jobs::in(std::chrono::minutes{5}));
+co_await jobs::dispatch(SendWelcome{...}, jobs::on("correos"));
+```
+
+El registro va en `bootstrap/queue.cpp`, junto al resto de la configuración:
+
+```cpp
+syrax::jobs::handle<SendWelcome>();
+```
+
+No es burocracia: el worker recibe texto, y C++ no tiene reflection en ejecución. Esa línea es lo que le permite volver del nombre `"send-welcome"` al tipo.
+
+**El worker es el mismo binario**, con otro argumento:
+
+```bash
+syrax queue:work      # corre los jobs encolados
+syrax queue:failed    # los que se rindieron, con el motivo
+syrax queue:retry     # devuelve los fallidos a la cola
+```
+
+```
+$ syrax queue:work
+  send-welcome (intento 1)  bienvenida para ada@example.com (#6)  ok
+```
+
+Levanta el loop de Drogon sin escuchar en ningún puerto, así que un job usa la base, el cache y tus servicios **exactamente igual** que un controlador. No hay un segundo mundo que mantener al día.
+
+**Dos drivers**, y la diferencia importa:
+
+| | |
+|---|---|
+| `database` | La misma base que el resto de la app. Una tabla, ninguna infraestructura nueva, y **entra en tus transacciones**. |
+| `redis` | Sin esquema, y más rápido cuando el volumen sube. Cada operación es un script Lua, así que reservar un job es atómico entre workers. |
+
+Lo transaccional es lo que solo puede dar el primero:
+
+```cpp
+co_await db::transaction([&](const db::Tx& tx) -> Task<...> {
+    co_await save(pedido, tx.client());
+    co_await jobs::dispatch(CobrarPedido{pedido.id}, tx);   // el mismo COMMIT
+});
+```
+
+Si el `COMMIT` falla, el job **tampoco existe**. Con Redis son dos sistemas distintos y nada los une: por eso ese `dispatch` con `tx` lanza si el driver no es el de base de datos, en vez de aparentar una garantía que no tiene.
+
+**Reintentos.** `tries` dice cuántas veces; entre una y otra la espera crece, porque reintentar de inmediato contra algo que está caído solo gasta los intentos que quedan. Al agotarlos el job pasa a los fallidos con el motivo, y ahí espera a que alguien lo mire.
+
+**Un job se ejecuta al menos una vez, no exactamente una vez.** Si el worker muere a mitad, el job sigue reservado hasta que vence `QUEUE_RETRY_AFTER` y entonces vuelve a la cola. Escríbelos de forma que correr dos veces no haga daño: es la misma regla que en cualquier otra cola.
+
 ### Middleware, autenticación y políticas
 
 Un middleware es una función que recibe la petición y devuelve un `Error` para cortar, o nada para dejar pasar. Sin clases, sin registro global:
@@ -728,7 +800,8 @@ database/
 
 src/
 ├── main.cpp
-├── bootstrap/            configuracion: app.cpp, database.cpp, cache.cpp
+├── bootstrap/            configuracion: app.cpp, database.cpp, cache.cpp, queue.cpp
+├── jobs/                 lo que corre fuera de la peticion
 ├── routes/               el mapa de la API, versionable
 │   ├── routes.cpp        /health y el alta de cada version
 │   └── v1.cpp            una linea por endpoint: ruta -> metodo del controlador, sin repetir el prefijo
@@ -794,6 +867,9 @@ Agregar un archivo a `tests/` no obliga a tocar ningún CMake, y `database/facto
 | `syrax migrate:status` | `m:s` | muestra cuáles están aplicadas |
 | `syrax db:seed` | `seed` | carga `database/seeders/*.sql` |
 | `syrax make:model <tabla>` | `m:m` | genera el modelo de Drogon (`Mapper<T>`) desde la base |
+| `syrax queue:work` | `work` | corre los jobs encolados |
+| `syrax queue:failed` | `q:f` | los que se rindieron, con el motivo |
+| `syrax queue:retry` | `q:r` | devuelve los fallidos a la cola |
 | `syrax test` | `t` | compila y corre `ctest` (ver nota abajo) |
 | `syrax upgrade` | `-u` | recompila e instala la última versión |
 | `syrax version` | `-v` | versión y origen |
@@ -833,23 +909,24 @@ Las digo aquí en vez de que las descubras tú:
 - **Un middleware no ve el body *tipado*.** Corre antes del parseo: alcanza los bytes crudos por `request.drogon()->getBody()`, pero no el struct ya validado. Para reglas que dependen del contenido está `rules()`.
 - **`Room` es de un solo proceso.** Un broadcast alcanza a las conexiones de *esta* instancia. Con varias réplicas detrás de un balanceador hace falta un bus externo, que Syrax no trae.
 - **El cache es un Redis, no una capa de cache.** `cache::` configura el cliente de Drogon y le pone encima `get`/`put`/`forget`/`remember`. No hay drivers intercambiables, tags, ni invalidación por dependencias: para eso está el cliente crudo.
-- **Sin colas ni jobs.** Son [no-objetivos](#no-objetivos) deliberados, no pendientes.
+- **Un job corre al menos una vez.** Si el worker muere con uno en la mano, vuelve a la cola cuando vence `QUEUE_RETRY_AFTER`. No hay forma barata de prometer "exactamente una vez", así que Syrax no la promete.
+- **Sin scheduler.** Un job se difiere (`jobs::in(...)`), pero no hay cron: para eso está cron.
 - **`ccache` solo acierta si el directorio de build es el mismo.** FetchContent deja Drogon *dentro* de `build/`, así que sus rutas de include forman parte de cada compilación: dos directorios distintos son dos entradas distintas y la caché no sirve. Borrar y rehacer `build/` en el mismo sitio sí acierta al 100%. Con `CCACHE_BASEDIR` se puede sortear, pero eso es configuración tuya, no del proyecto.
 - **Pre-1.0.** La API puede cambiar sin aviso.
 
 ## No-objetivos
 
 ```
-Joins y relaciones  Colas / Jobs        Scheduler
-Lazy / eager load   Event bus           Service discovery
-Mail                gRPC                Load balancing
-                    Storage / S3        Circuit breakers
-                    Drivers de cache    Broker de sockets
+Joins y relaciones  Scheduler / cron    Service discovery
+Lazy / eager load   Event bus           Load balancing
+Mail                gRPC                Circuit breakers
+                    Storage / S3        Broker de sockets
+                    Drivers de cache
 ```
 
 Syrax compone; no reemplaza. Si tu proyecto necesita algo de esto, tómalo de una librería existente.
 
-**Regla de admisión:** una feature entra sólo si hace *notablemente más fácil crear una API*, y si es superficie finita. Un schema builder es finito (11 tipos de columna por 3 dialectos). Un query builder sin joins también: filtrar, ordenar, paginar, guardar y borrar. Con relaciones —lazy loading, cascadas, el N+1— deja de serlo, y por eso `Query<T>` se planta justo ahí.
+**Regla de admisión:** una feature entra sólo si hace *notablemente más fácil crear una API*, y si es superficie finita. Una cola lo es: encolar, sacar, ejecutar, reintentar, rendirse y diferir. Con cadenas, lotes y colas con rate limit deja de serlo, y por eso no están. Un schema builder es finito (11 tipos de columna por 3 dialectos). Un query builder sin joins también: filtrar, ordenar, paginar, guardar y borrar. Con relaciones —lazy loading, cascadas, el N+1— deja de serlo, y por eso `Query<T>` se planta justo ahí.
 
 ---
 
@@ -868,6 +945,7 @@ Syrax compone; no reemplaza. Si tu proyecto necesita algo de esto, tómalo de un
 │  Query builder tipado sobre ese mismo struct     │
 │  Schema builder y migraciones, en los 3 motores  │
 │  Configuracion y cache en Redis                  │
+│  Colas de trabajos, en base de datos o Redis     │
 │  Generación de OpenAPI                           │
 │  Middleware, JWT, políticas                      │
 │  WebSockets con broadcast                        │

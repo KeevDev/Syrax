@@ -167,6 +167,12 @@ DB_USER=postgres
 DB_PASSWORD=postgres
 DB_POOL=4
 
+# La cola de jobs: database usa la misma base (y entra en tus
+# transacciones); redis necesita el REDIS_* de abajo.
+QUEUE_DRIVER=database
+QUEUE_NAME=default
+QUEUE_RETRY_AFTER=90
+
 # Cache en Redis. Apagado hasta que lo necesites: sin esto la app no
 # intenta conectarse a ningun Redis.
 CACHE_ENABLED=false
@@ -194,6 +200,12 @@ DB_PASSWORD=root
 DB_POOL=4
 DB_CHARSET=utf8mb4
 
+# La cola de jobs: database usa la misma base (y entra en tus
+# transacciones); redis necesita el REDIS_* de abajo.
+QUEUE_DRIVER=database
+QUEUE_NAME=default
+QUEUE_RETRY_AFTER=90
+
 # Cache en Redis. Apagado hasta que lo necesites: sin esto la app no
 # intenta conectarse a ningun Redis.
 CACHE_ENABLED=false
@@ -211,6 +223,12 @@ API_BASE=/api/v1
 
 DB_ENGINE=sqlite
 DB_FILE=app.db
+
+# La cola de jobs: database usa la misma base (y entra en tus
+# transacciones); redis necesita el REDIS_* de abajo.
+QUEUE_DRIVER=database
+QUEUE_NAME=default
+QUEUE_RETRY_AFTER=90
 
 # Cache en Redis. Apagado hasta que lo necesites: sin esto la app no
 # intenta conectarse a ningun Redis.
@@ -301,6 +319,7 @@ inline constexpr std::string_view kBootstrapCpp = R"T(#include "bootstrap/app.hp
 
 #include "bootstrap/cache.hpp"
 #include "bootstrap/database.hpp"
+#include "bootstrap/queue.hpp"
 #include "routes/routes.hpp"
 
 #include <filesystem>
@@ -316,6 +335,7 @@ syrax::App create() {
 
     database();
     cache();
+    queue();
 
     syrax::App app;
 
@@ -393,6 +413,71 @@ void cache() {
 }
 
 }  // namespace bootstrap
+)T";
+
+inline constexpr std::string_view kBootstrapQueueH = R"T(#pragma once
+
+namespace bootstrap {
+
+void queue();
+
+}  // namespace bootstrap
+)T";
+
+inline constexpr std::string_view kBootstrapQueueCpp = R"T(#include "bootstrap/queue.hpp"
+
+#include "jobs/SendWelcome.hpp"
+
+#include <syrax/syrax.hpp>
+
+#include <chrono>
+
+namespace bootstrap {
+
+void queue() {
+    if (syrax::env("QUEUE_DRIVER", "database") == "redis") {
+        syrax::cache::connect({
+            .host     = syrax::env("REDIS_HOST", "127.0.0.1"),
+            .port     = static_cast<unsigned short>(syrax::envInt("REDIS_PORT", 6379)),
+            .password = syrax::env("REDIS_PASSWORD", ""),
+            .database = static_cast<unsigned int>(syrax::envInt("REDIS_DB", 0)),
+            .timeout  = 5.0,
+            .name     = "queue",
+        });
+    }
+
+    syrax::jobs::connect({
+        .driver     = syrax::env("QUEUE_DRIVER", "database"),
+        .queue      = syrax::env("QUEUE_NAME", "default"),
+        .retryAfter = std::chrono::seconds{syrax::envInt("QUEUE_RETRY_AFTER", 90)},
+    });
+
+    syrax::jobs::handle<SendWelcome>();
+}
+
+}  // namespace bootstrap
+)T";
+
+inline constexpr std::string_view kJobSendWelcome = R"T(#pragma once
+
+#include <syrax/syrax.hpp>
+
+#include <cstdint>
+#include <iostream>
+#include <string>
+
+struct SendWelcome {
+    std::int64_t userId = 0;
+    std::string  email;
+
+    static constexpr auto name  = "send-welcome";
+    static constexpr int  tries = 3;
+
+    syrax::Task<void> handle() const {
+        std::cout << "  bienvenida para " << email << " (#" << userId << ")";
+        co_return;
+    }
+};
 )T";
 
 inline constexpr std::string_view kGitkeep = R"T()T";
@@ -997,6 +1082,19 @@ int main(int argc, char** argv) {
         return migrations(arg);
     }
 
+    if (arg == "queue:work" || arg == "queue:failed" || arg == "queue:retry") {
+        try {
+            auto app = bootstrap::create();
+
+            if (arg == "queue:failed") return syrax::jobs::listFailed();
+            if (arg == "queue:retry")  return syrax::jobs::retryAll();
+            return syrax::jobs::work();
+        } catch (const std::exception& e) {
+            std::cerr << "\nerror: " << e.what() << "\n\n";
+            return 1;
+        }
+    }
+
     const auto port = arg.empty() ? syrax::envPort()
                                   : static_cast<std::uint16_t>(std::atoi(arg.c_str()));
 
@@ -1302,6 +1400,7 @@ syrax::Task<bool>                        remove(std::int64_t id);
 
 inline constexpr std::string_view kServiceUserCpp = R"T(#include "services/User/UserService.hpp"
 
+#include "jobs/SendWelcome.hpp"
 #include "repositories/User/UserRepository.hpp"
 
 namespace services::UserService {
@@ -1317,8 +1416,12 @@ syrax::Task<std::optional<models::User>> byId(std::int64_t id) {
 }
 
 syrax::Task<std::optional<models::User>> create(requests::CreateUser input) {
-    co_return co_await repo::createIfEmailFree(std::move(input.name),
-                                               std::move(input.email), input.age);
+    auto nuevo = co_await repo::createIfEmailFree(std::move(input.name),
+                                                  std::move(input.email), input.age);
+    if (nuevo) {
+        co_await syrax::jobs::dispatch(SendWelcome{.userId = nuevo->id, .email = nuevo->email});
+    }
+    co_return nuevo;
 }
 
 syrax::Task<std::optional<models::User>> update(std::int64_t id,
@@ -1444,6 +1547,9 @@ inline constexpr File kProjectFiles[] = {
     {"src/bootstrap/database.cpp",               kBootstrapDatabaseCpp},
     {"src/bootstrap/cache.hpp",                  kBootstrapCacheH},
     {"src/bootstrap/cache.cpp",                  kBootstrapCacheCpp},
+    {"src/bootstrap/queue.hpp",                  kBootstrapQueueH},
+    {"src/bootstrap/queue.cpp",                  kBootstrapQueueCpp},
+    {"src/jobs/SendWelcome.hpp",                 kJobSendWelcome},
     {"src/routes/routes.hpp",                    kRoutesH},
     {"src/routes/routes.cpp",                    kRoutesCpp},
     {"src/routes/v1.hpp",                        kRoutesV1H},

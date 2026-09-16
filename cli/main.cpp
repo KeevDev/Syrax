@@ -50,6 +50,8 @@ constexpr Alias kAliases[] = {
     {"m:r", "migrate:rollback"},   {"rollback", "migrate:rollback"},
     {"m:s", "migrate:status"},     {"status", "migrate:status"},
     {"seed", "db:seed"},           {"db:s", "db:seed"},
+    {"work", "queue:work"},        {"q:w", "queue:work"},
+    {"q:f", "queue:failed"},       {"q:r", "queue:retry"},
     {"t", "test"},
     {"u", "upgrade"},              {"-u", "upgrade"},      {"--upgrade", "upgrade"},
     {"v", "version"},              {"-v", "version"},      {"--version", "version"},
@@ -808,6 +810,10 @@ int usage() {
         "  migrate:status                        m:s  muestra cuales estan aplicadas\n"
         "  db:seed                               seed carga database/seeders/*.sql\n"
         "  make:model <tabla>                    m:m  genera el modelo de Drogon (Mapper<T>)\n"
+        "\n"
+        "  queue:work                            work corre los jobs encolados\n"
+        "  queue:failed                          q:f  lista los que se rindieron\n"
+        "  queue:retry                           q:r  devuelve los fallidos a la cola\n"
         "  test                                  t    compila y corre los tests\n"
         "\n"
         "  upgrade                               -u   recompila e instala la ultima version\n"
@@ -862,6 +868,12 @@ int main(int argc, char** argv) {
     if (cmd == "migrate:rollback") return cmdMigrate("migrate:rollback");
     if (cmd == "migrate:status")   return cmdMigrate("migrate:status");
     if (cmd == "db:seed")          return cmdSeed();
+
+    // El worker y el resto de la cola corren dentro del binario del proyecto,
+    // que es quien conoce los jobs. El CLI solo compila y delega.
+    if (cmd == "queue:work")       return cmdMigrate("queue:work");
+    if (cmd == "queue:failed")     return cmdMigrate("queue:failed");
+    if (cmd == "queue:retry")      return cmdMigrate("queue:retry");
     if (cmd == "make:model" || cmd == "m:m") {
         return cmdMakeModel(argc > 2 ? argv[2] : "");
     }

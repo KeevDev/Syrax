@@ -9,6 +9,14 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
+    # Los tests del driver de Redis se saltan si no hay servidor. Sin esto
+    # pasarian siempre, sin probar nada.
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+
     steps:
       - uses: actions/checkout@v4
 
@@ -19,7 +27,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             g++-14 cmake ninja-build \
             libjsoncpp-dev uuid-dev zlib1g-dev libssl-dev \
-            libpq-dev libsqlite3-dev libc-ares-dev libbrotli-dev
+            libpq-dev libsqlite3-dev libc-ares-dev libbrotli-dev libhiredis-dev
 
       - name: Configurar
         env:
@@ -41,6 +49,12 @@ jobs:
   clang:
     runs-on: ubuntu-latest
 
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+
     steps:
       - uses: actions/checkout@v4
 
@@ -50,7 +64,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             clang cmake ninja-build \
             libjsoncpp-dev uuid-dev zlib1g-dev libssl-dev \
-            libpq-dev libsqlite3-dev libc-ares-dev libbrotli-dev
+            libpq-dev libsqlite3-dev libc-ares-dev libbrotli-dev libhiredis-dev
           clang++ --version
 
       - name: Configurar

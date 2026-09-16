@@ -14,6 +14,7 @@
 
 #include <chrono>
 #include <csignal>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -98,6 +99,46 @@ std::string substitute(std::string_view tpl, std::string_view name,
         }
     }
     return out;
+}
+
+// Los binarios del andamiaje viajan en base64 dentro del propio ejecutable:
+// el CLI no baja nada de la red al generar un proyecto.
+std::string decodeBase64(const std::string& texto) {
+    static constexpr std::string_view kAlfabeto =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    std::string  salida;
+    std::uint32_t acumulado = 0;
+    int           bits      = -8;
+
+    for (const unsigned char c : texto) {
+        const auto pos = kAlfabeto.find(static_cast<char>(c));
+        if (pos == std::string_view::npos) continue;
+
+        acumulado = (acumulado << 6) + static_cast<std::uint32_t>(pos);
+        bits += 6;
+
+        if (bits >= 0) {
+            salida.push_back(static_cast<char>((acumulado >> bits) & 0xFF));
+            bits -= 8;
+        }
+    }
+    return salida;
+}
+
+bool writeBinary(const fs::path& path, const tpl::BinaryFile& file) {
+    std::string base64;
+    for (std::size_t i = 0; i < file.count; ++i) base64 += file.chunks[i];
+
+    std::ofstream out(path, std::ios::binary);
+    if (!out) {
+        std::cerr << "error: no pude escribir " << path << "\n";
+        return false;
+    }
+
+    const auto bytes = decodeBase64(base64);
+    out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    return out.good();
 }
 
 bool writeFile(const fs::path& path, std::string_view content) {
@@ -272,6 +313,14 @@ int cmdNew(const std::string& name, tpl::Engine engine, bool engineGiven) {
         if (!writeFile(out, substitute(file.content, name, repo, tag, engine))) {
             return 1;
         }
+        written.emplace_back(file.path);
+    }
+
+    for (const auto& file : tpl::kBinaryProjectFiles) {
+        const fs::path out = root / file.path;
+        if (out.has_parent_path()) fs::create_directories(out.parent_path());
+
+        if (!writeBinary(out, file)) return 1;
         written.emplace_back(file.path);
     }
 

@@ -499,7 +499,8 @@ config/app.json           ajustes del servidor (versionado)
 docker/Dockerfile         imagen multi-etapa
 docker-compose.yml        postgres, si elegiste ese motor
 public/
-├── index.html            portada: Syrax en vuelo, y dos tarjetones
+├── index.html            portada: Syrax, y dos tarjetones
+├── dragon.jpg            la ilustracion de la portada
 └── syrax.html            el started del framework, sin salir del proyecto
 logs/
 

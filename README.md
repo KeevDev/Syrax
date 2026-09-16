@@ -498,7 +498,9 @@ config/app.json           ajustes del servidor (versionado)
 .env.example              las mismas claves, sin valores (SI versionado)
 docker/Dockerfile         imagen multi-etapa
 docker-compose.yml        postgres, si elegiste ese motor
-public/                   estaticos, con una portada de bienvenida
+public/
+├── index.html            portada: Syrax en vuelo, y dos tarjetones
+└── syrax.html            el started del framework, sin salir del proyecto
 logs/
 
 database/

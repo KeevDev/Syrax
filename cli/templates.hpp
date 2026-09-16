@@ -273,171 +273,395 @@ inline constexpr std::string_view kPublicIndex = R"T(<!DOCTYPE html>
 <title>@NAME@ — Syrax</title>
 <style>
 :root {
-  color-scheme: light dark;
-  --papel:  #f3f4f7;  --panel:  #ffffff;  --linea: #dfe1e8;
-  --tinta:  #14161c;  --gris:   #666c7a;
-  --error:  #c62828;  --caret:  #2e7d32;  --nota:  #0f6f86;
-  --sombra: 0 1px 2px rgba(20, 22, 28, .05);
-  --mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
+  --noche:  #071026;
+  --abismo: #040a18;
+  --oro:    #f0b429;
+  --oro-claro: #ffd76a;
+  --acero:  #7fa8d9;
+  --hueso:  #e8eefc;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
-@media (prefers-color-scheme: dark) {
-  :root {
-    --papel: #101218; --panel: #171a22; --linea: #272b36;
-    --tinta: #e8eaf0; --gris:  #9aa1b1;
-    --error: #ef6b62; --caret: #78c47e; --nota:  #5cc0da;
-    --sombra: none;
-  }
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0; color: var(--hueso);
+  background:
+    radial-gradient(1200px 600px at 70% -10%, #16325c 0%, transparent 60%),
+    radial-gradient(800px 500px at 15% 10%, #0d2148 0%, transparent 55%),
+    linear-gradient(180deg, var(--noche) 0%, var(--abismo) 100%);
+  background-attachment: fixed;
+  font: 15px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  overflow-x: hidden;
+}
+
+/* ---------- estrellas ---------- */
+.estrellas {
+  position: fixed; inset: 0; pointer-events: none; opacity: .5;
+  background-image:
+    radial-gradient(1px 1px at 12% 22%, #fff, transparent),
+    radial-gradient(1px 1px at 78% 14%, #cfe0ff, transparent),
+    radial-gradient(1px 1px at 33% 61%, #fff, transparent),
+    radial-gradient(1px 1px at 61% 42%, #bcd3ff, transparent),
+    radial-gradient(1px 1px at 88% 68%, #fff, transparent),
+    radial-gradient(1px 1px at 45% 8%, #fff, transparent),
+    radial-gradient(1px 1px at 24% 84%, #cfe0ff, transparent);
+}
+
+.hoja { max-width: 900px; margin: 0 auto; padding: 40px 24px 72px; position: relative; }
+
+/* ---------- el dragon ---------- */
+.vuelo { display: block; margin: 0 auto; width: min(560px, 92%); height: auto; overflow: visible; }
+.dragon { animation: planea 6s ease-in-out infinite; transform-box: view-box; transform-origin: 260px 180px; }
+.ala { transform-box: view-box; transform-origin: 290px 168px; }
+.ala-lejos { animation: aleteo-lejos 2.6s ease-in-out infinite; }
+.ala-cerca { animation: aleteo 2.6s ease-in-out infinite; }
+@keyframes aleteo {
+  0%, 100% { transform: rotate(6deg) scaleX(.97); }
+  50%      { transform: rotate(-22deg) scaleX(1.06); }
+}
+@keyframes aleteo-lejos {
+  0%, 100% { transform: rotate(4deg) scaleX(.95); }
+  50%      { transform: rotate(-16deg) scaleX(1.02); }
+}
+@keyframes planea {
+  0%, 100% { transform: translateY(0) rotate(-1deg); }
+  50%      { transform: translateY(-14px) rotate(1deg); }
+}
+.ojo { animation: brasa 3.4s ease-in-out infinite; }
+.llama { animation: llamarada 2.9s ease-in-out infinite; transform-box: view-box; transform-origin: 438px 104px; }
+@keyframes llamarada {
+  0%, 62%, 100% { opacity: 0; transform: scaleX(.5); }
+  72%           { opacity: .95; transform: scaleX(1.15); }
+  86%           { opacity: .35; transform: scaleX(1.5); }
+}
+@keyframes brasa { 0%, 100% { opacity: .55; } 50% { opacity: 1; } }
+
+/* ---------- cabecera ---------- */
+.marca {
+  text-align: center; margin: 4px 0 0;
+  font: 400 76px/1 Georgia, "Times New Roman", serif;
+  letter-spacing: .22em; text-indent: .22em; text-transform: uppercase;
+  color: var(--oro);
+  text-shadow: 0 0 28px rgba(240, 180, 41, .35);
+}
+.lema { text-align: center; color: var(--acero); margin: 14px 0 6px; }
+.proyecto {
+  text-align: center; font: 12px/1 var(--mono); color: var(--oro-claro);
+  letter-spacing: .1em; opacity: .85;
+}
+
+/* ---------- tarjetones ---------- */
+.tarjetones {
+  display: grid; gap: 18px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  margin: 54px 0 34px;
+}
+.tarjeton {
+  position: relative; display: block; padding: 30px 28px 26px;
+  text-decoration: none; color: inherit; border-radius: 14px;
+  background: linear-gradient(180deg, rgba(27, 58, 107, .55), rgba(9, 20, 43, .75));
+  border: 1px solid rgba(127, 168, 217, .25);
+  transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease;
+  overflow: hidden;
+}
+.tarjeton:hover, .tarjeton:focus-visible {
+  transform: translateY(-3px); border-color: var(--oro);
+  box-shadow: 0 10px 40px rgba(240, 180, 41, .18);
+  outline: none;
+}
+.tarjeton .sello { font: 12px/1 var(--mono); color: var(--oro); letter-spacing: .14em; }
+.tarjeton h2 {
+  margin: 14px 0 8px; font: 400 27px/1.15 Georgia, "Times New Roman", serif; color: var(--hueso);
+}
+.tarjeton p { margin: 0; color: var(--acero); font-size: 14px; }
+.tarjeton .flecha { margin-top: 18px; color: var(--oro); font: 13px/1 var(--mono); }
+
+/* ---------- enlaces menores ---------- */
+.menores { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+.menor {
+  text-decoration: none; color: var(--acero); font: 12px/1 var(--mono);
+  padding: 9px 14px; border: 1px solid rgba(127, 168, 217, .2); border-radius: 999px;
+  transition: color .15s ease, border-color .15s ease;
+}
+.menor:hover { color: var(--oro); border-color: rgba(240, 180, 41, .5); }
+
+footer { margin-top: 44px; text-align: center; color: #56719c; font-size: 12px; }
+footer code { color: var(--acero); }
+
+@media (prefers-reduced-motion: reduce) {
+  .dragon, .ala-cerca, .ala-lejos, .ojo, .llama { animation: none; }
+  .llama { opacity: .6; }
+}
+</style>
+</head>
+<body>
+<div class="estrellas"></div>
+
+<div class="hoja">
+
+  <svg class="vuelo" viewBox="0 0 480 300" role="img" aria-label="Syrax, un dragon dorado en vuelo">
+    <defs>
+      <linearGradient id="escama" x1="0" y1="0" x2="0.3" y2="1">
+        <stop offset="0%" stop-color="#ffd76a"/>
+        <stop offset="50%" stop-color="#f0b429"/>
+        <stop offset="100%" stop-color="#c2870f"/>
+      </linearGradient>
+      <linearGradient id="membrana" x1="0.1" y1="0" x2="0.7" y2="1">
+        <stop offset="0%" stop-color="#e9b02a"/>
+        <stop offset="100%" stop-color="#a46a08"/>
+      </linearGradient>
+      <radialGradient id="aliento">
+        <stop offset="0%" stop-color="#fff3c4"/>
+        <stop offset="45%" stop-color="#ff9d3d"/>
+        <stop offset="100%" stop-color="rgba(255,120,40,0)"/>
+      </radialGradient>
+    </defs>
+
+    <g class="dragon">
+
+      <!-- ala del fondo -->
+      <g class="ala ala-lejos" opacity=".5" transform="translate(26 -10)">
+        <path d="M290 168
+                 C 282 128, 268 96, 244 74
+                 C 258 106, 262 122, 262 140
+                 C 246 122, 226 110, 204 104
+                 C 228 128, 242 148, 250 168
+                 C 268 168, 280 169, 290 168 Z"
+              fill="url(#membrana)"/>
+      </g>
+
+      <!-- cuerpo, cuello, cabeza y cola: una sola silueta -->
+      <path d="M292 176
+               C 316 150, 342 126, 372 110
+               C 388 101, 406 94, 428 90
+               C 438 90, 442 96, 437 103
+               C 426 109, 413 114, 400 120
+               C 405 126, 407 133, 405 141
+               C 393 134, 380 131, 366 134
+               C 346 142, 326 157, 310 176
+               C 298 188, 284 196, 266 201
+               C 244 208, 224 209, 206 203
+               C 166 214, 118 228, 72 240
+               L 38 248 L 22 236 L 32 251 L 16 264 L 46 258
+               C 96 249, 150 235, 200 220
+               C 226 215, 256 207, 276 195
+               C 286 189, 291 183, 292 176 Z"
+            fill="url(#escama)"/>
+
+      <!-- puas del lomo y el cuello -->
+      <path d="M318 162 l 13 -10 l -4 15 z
+               M340 142 l 14 -9 l -5 15 z
+               M364 124 l 14 -8 l -6 14 z
+               M262 198 l 12 -11 l -2 15 z
+               M212 210 l 11 -11 l -1 15 z
+               M160 224 l 10 -11 l 0 14 z"
+            fill="#f5cd5a"/>
+
+      <!-- cuerno -->
+      <path d="M392 104 C 374 88, 352 78, 328 76 C 352 86, 372 98, 386 114 Z" fill="#ffd76a"/>
+
+      <!-- ojo -->
+      <circle class="ojo" cx="414" cy="104" r="3.4" fill="#0b1633"/>
+
+      <!-- patas recogidas -->
+      <path d="M286 196 C 292 210, 286 224, 270 232
+               C 286 228, 302 220, 308 206 C 311 198, 304 192, 296 192 Z"
+            fill="#c98a12"/>
+      <path d="M244 206 C 250 218, 246 230, 234 238
+               C 248 234, 260 226, 264 214 C 266 208, 260 202, 252 202 Z"
+            fill="#d89a1b"/>
+
+      <!-- aliento -->
+      <ellipse class="llama" cx="456" cy="104" rx="18" ry="10" fill="url(#aliento)"/>
+
+      <!-- ala del frente -->
+      <g class="ala ala-cerca">
+        <path d="M290 168
+                 C 276 122, 250 84, 212 62
+                 C 176 42, 140 32, 104 30
+                 C 138 62, 150 78, 160 96
+                 C 136 96, 112 102, 90 114
+                 C 126 128, 146 142, 162 158
+                 C 142 168, 124 182, 108 200
+                 C 158 198, 214 188, 268 172 Z"
+              fill="url(#membrana)"/>
+        <path d="M290 168 C 258 118, 220 78, 104 30
+                 M290 168 C 250 140, 200 118, 90 114
+                 M290 168 C 246 176, 190 188, 108 200"
+              stroke="#8a5c08" stroke-width="2" fill="none" opacity=".55" stroke-linecap="round"/>
+      </g>
+
+    </g>
+  </svg>
+
+  <h1 class="marca">Syrax</h1>
+  <p class="lema">Un framework de APIs para C++ moderno.</p>
+  <p class="proyecto">@NAME@ esta en vuelo</p>
+
+  <div class="tarjetones">
+    <a class="tarjeton" href="/docs">
+      <span class="sello">01</span>
+      <h2>Doc de tu API</h2>
+      <p>Los endpoints de @NAME@, con sus esquemas y un boton para probarlos. Sale de tus tipos, no de anotaciones.</p>
+      <div class="flecha">/docs -&gt;</div>
+    </a>
+
+    <a class="tarjeton" href="/syrax.html">
+      <span class="sello">02</span>
+      <h2>Doc del framework</h2>
+      <p>Como se escribe un endpoint, como se valida, como se habla con la base y que comandos hay. Empieza por aqui.</p>
+      <div class="flecha">started -&gt;</div>
+    </a>
+  </div>
+
+  <div class="menores">
+    <a class="menor" href="/openapi.json">openapi.json</a>
+    <a class="menor" href="/health">health</a>
+    <a class="menor" href="https://github.com/KeevDev/Syrax">github</a>
+  </div>
+
+  <footer>
+    Esta portada es <code>public/index.html</code>. Editala o borrala: es tuya.
+  </footer>
+
+</div>
+</body>
+</html>
+)T";
+
+inline constexpr std::string_view kPublicStarted = R"T(<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Empezar con Syrax</title>
+<style>
+:root {
+  --noche: #071026; --abismo: #040a18; --oro: #f0b429; --oro-claro: #ffd76a;
+  --acero: #7fa8d9; --hueso: #e8eefc; --tinta: rgba(9,20,43,.72);
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 * { box-sizing: border-box; }
 body {
-  margin: 0; background: var(--papel); color: var(--tinta);
-  font: 15px/1.65 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  -webkit-font-smoothing: antialiased;
+  margin: 0; color: var(--hueso); min-height: 100%;
+  background:
+    radial-gradient(1000px 500px at 80% -10%, #16325c 0%, transparent 60%),
+    linear-gradient(180deg, var(--noche) 0%, var(--abismo) 100%);
+  background-attachment: fixed;
+  font: 15px/1.7 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
-.hoja { max-width: 780px; margin: 0 auto; padding: 64px 24px 96px; }
-a { color: var(--nota); }
-a:focus-visible, .enlace:focus-visible { outline: 2px solid var(--nota); outline-offset: 3px; }
-
-/* ---- cabecera ---- */
-.prompt { font: 12px/1 var(--mono); color: var(--gris); margin-bottom: 26px; }
-.prompt b { color: var(--caret); font-weight: 500; }
-.marca {
-  font: 600 46px/1 var(--mono); letter-spacing: -0.045em; margin: 0;
-}
-.tesis { color: var(--gris); margin: 12px 0 0; max-width: 46ch; font-size: 16px; }
-
-/* ---- el diagnostico: la pieza central ---- */
-.diagnostico {
-  margin: 38px 0 12px; padding: 22px 24px; background: var(--panel);
-  border: 1px solid var(--linea); border-left: 3px solid var(--error);
-  border-radius: 4px; box-shadow: var(--sombra);
-  font: 13px/1.85 var(--mono); overflow-x: auto;
-}
-.diagnostico .codigo { white-space: pre; }
-.diagnostico .mal { color: var(--error); }
-.subraya {
-  display: block; color: var(--caret); white-space: pre;
-  animation: crece .5s .35s steps(12, end) both;
-}
-@keyframes crece { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0 0 0 0); } }
-.veredicto { margin-top: 12px; color: var(--error); white-space: pre-wrap; }
-.veredicto .sug { color: var(--caret); }
-@media (prefers-reduced-motion: reduce) { .subraya { animation: none; } }
-
-.pie-diagnostico { color: var(--gris); font-size: 14px; margin: 0 0 56px; max-width: 54ch; }
-
-/* ---- secciones ---- */
+.hoja { max-width: 760px; margin: 0 auto; padding: 44px 24px 90px; }
+.volver { display: inline-block; color: var(--acero); text-decoration: none; font: 12px/1 var(--mono); margin-bottom: 34px; }
+.volver:hover { color: var(--oro); }
+h1 { font: 400 42px/1.1 Georgia, "Times New Roman", serif; color: var(--oro); margin: 0 0 10px; letter-spacing: .01em; }
+.entrada { color: var(--acero); margin: 0 0 46px; max-width: 58ch; }
+section { margin-bottom: 42px; }
 h2 {
-  font: 600 12px/1 var(--mono); letter-spacing: .14em; text-transform: uppercase;
-  color: var(--gris); margin: 0 0 16px;
+  font: 400 24px/1.2 Georgia, "Times New Roman", serif; color: var(--hueso);
+  margin: 0 0 6px; display: flex; align-items: baseline; gap: 12px;
 }
-section { margin-bottom: 52px; }
+h2 .n { font: 12px/1 var(--mono); color: var(--oro); letter-spacing: .12em; }
+section p { color: var(--acero); margin: 0 0 14px; max-width: 62ch; }
 pre {
-  margin: 0; padding: 20px 22px; background: var(--panel); border: 1px solid var(--linea);
-  border-radius: 4px; overflow-x: auto; font: 13px/1.8 var(--mono); box-shadow: var(--sombra);
+  margin: 0; padding: 18px 20px; border-radius: 10px; overflow-x: auto;
+  background: var(--tinta); border: 1px solid rgba(127,168,217,.2);
+  font: 13px/1.75 var(--mono); color: #dbe6fb;
 }
-pre .c { color: var(--gris); }
-pre .k { color: var(--nota); }
-
-/* lo que escribes / lo que no */
-.cuentas { display: flex; gap: 28px; flex-wrap: wrap; align-items: flex-end; margin-top: 18px; }
-.cuenta { flex: 1 1 200px; }
-.cifra { font: 600 34px/1 var(--mono); letter-spacing: -.03em; display: block; }
-.cifra.propia { color: var(--caret); }
-.cifra.ajena  { color: var(--gris); text-decoration: line-through; text-decoration-thickness: 1px; }
-.cuenta span.que { display: block; color: var(--gris); font-size: 13px; margin-top: 6px; }
-
-.hace { list-style: none; padding: 0; margin: 16px 0 0; }
-.hace li {
-  padding: 9px 0 9px 22px; border-top: 1px solid var(--linea); position: relative;
-  font-size: 14px; color: var(--gris);
-}
-.hace li::before {
-  content: "->"; position: absolute; left: 0; color: var(--caret);
-  font: 12px/1.9 var(--mono);
-}
-.hace li b { color: var(--tinta); font-weight: 500; }
-
-.enlaces { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
-.enlace {
-  display: block; padding: 15px 16px; background: var(--panel); border: 1px solid var(--linea);
-  border-radius: 4px; text-decoration: none; color: inherit; box-shadow: var(--sombra);
-  transition: border-color .15s ease;
-}
-.enlace:hover { border-color: var(--nota); }
-.enlace b { display: block; font: 600 13px/1.4 var(--mono); }
-.enlace span { color: var(--gris); font-size: 13px; }
-
-footer { border-top: 1px solid var(--linea); padding-top: 18px; color: var(--gris); font-size: 13px; }
+pre .c { color: #6f8ab5; }
+pre .k { color: var(--oro-claro); }
+code { font: 13px/1 var(--mono); color: var(--oro-claro); }
+footer { border-top: 1px solid rgba(127,168,217,.18); padding-top: 18px; color: #56719c; font-size: 13px; }
+footer a { color: var(--oro); }
 </style>
 </head>
 <body>
 <div class="hoja">
 
-  <p class="prompt">~/@NAME@ <b>$</b> syrax serve</p>
-  <h1 class="marca">syrax</h1>
-  <p class="tesis">Un framework de APIs para C++ moderno donde el compilador es la red de seguridad.</p>
+  <a class="volver" href="/">&lt;- volver</a>
 
-  <div class="diagnostico">
-    <div class="codigo">co_await Query&lt;User&gt;().where(&amp;User::<span class="mal">emial</span>, "=", email);
-<span class="subraya">                                    ^~~~~</span></div>
-    <div class="veredicto">error: 'emial' is not a member of 'User'<span class="sug">; did you mean 'email'?</span></div>
-  </div>
-  <p class="pie-diagnostico">
-    El nombre de una columna es un puntero a miembro, no un string. La errata no
-    llega a produccion porque no llega ni a compilar. Lo mismo vale para el body
-    de una peticion, el esquema del OpenAPI y la forma de una fila.
+  <h1>Empezar con Syrax</h1>
+  <p class="entrada">
+    Lo justo para moverte por el proyecto que acabas de generar. El README del
+    repositorio tiene el resto, con los porques.
   </p>
 
   <section>
-    <h2>Una firma, y el resto sale solo</h2>
-    <pre><span class="k">app</span>.post("/users", [](requests::CreateUser body)
-        -&gt; Task&lt;Result&lt;UserResource&gt;&gt; {
-    <span class="c">// el body ya llego parseado y validado</span>
-    co_return resources::from(co_await service::create(body));
-});</pre>
-    <ul class="hace">
-      <li><b>Parsea</b> el JSON en tu struct, por reflexion, sin macros</li>
-      <li><b>Valida</b> las reglas del tipo y responde 422 con detalle por campo</li>
-      <li><b>Serializa</b> la respuesta y fija el codigo de estado</li>
-      <li><b>Documenta</b> la ruta en /docs sin que anotes nada</li>
-    </ul>
+    <h2><span class="n">01</span> Un endpoint</h2>
+    <p>La firma del handler es la fuente de todo: de ella salen el body a parsear, los path params, el codigo de estado y lo que se documenta.</p>
+    <pre><span class="c">// src/routes/v1.cpp</span>
+api.get("/users/{id}", user::show).as("users.show");
+
+<span class="c">// src/http/controllers/User/UserController.cpp</span>
+Task&lt;Result&lt;UserResource&gt;&gt; show(std::int64_t id) {
+    const auto user = co_await service::byId(id);
+    if (!user) co_return NotFound("user not found");
+
+    co_return resources::from(*user);
+}</pre>
   </section>
 
   <section>
-    <h2>Un modelo son quince lineas</h2>
-    <div class="cuentas">
-      <div class="cuenta">
-        <span class="cifra propia">15</span>
-        <span class="que">el struct que escribes tu</span>
-      </div>
-      <div class="cuenta">
-        <span class="cifra ajena">1.632</span>
-        <span class="que">las que genera un ORM para la misma tabla de 6 columnas</span>
-      </div>
-    </div>
+    <h2><span class="n">02</span> Los errores son valores</h2>
+    <p>No hay excepciones de control de flujo: devuelves el error y Syrax lo traduce a una respuesta JSON uniforme.</p>
+    <pre>co_return NotFound("user not found");
+co_return Conflict("email already registered");
+co_return Forbidden("no puedes editar este post");</pre>
   </section>
 
   <section>
-    <h2>A donde ir</h2>
-    <div class="enlaces">
-      <a class="enlace" href="/docs"><b>/docs</b><span>tu API, endpoint por endpoint</span></a>
-      <a class="enlace" href="/openapi.json"><b>/openapi.json</b><span>el contrato, para generar clientes</span></a>
-      <a class="enlace" href="https://github.com/KeevDev/Syrax"><b>github</b><span>el README completo del framework</span></a>
-    </div>
+    <h2><span class="n">03</span> Validacion en el tipo</h2>
+    <p>Las reglas viven en el struct del request. Un body que no cumple nunca llega al handler: sale un 422 con el detalle por campo, y los limites entran solos al /docs.</p>
+    <pre>struct CreateUser {
+    std::string name;
+    std::string email;
+    int         age;
+
+    static auto rules() {
+        return syrax::rules(
+            syrax::field(&amp;CreateUser::name).notEmpty().minLen(2),
+            syrax::field(&amp;CreateUser::email).email(),
+            syrax::field(&amp;CreateUser::age).range(0, 130));
+    }
+};</pre>
   </section>
 
   <section>
-    <h2>Mientras tanto</h2>
-    <pre>syrax migrate      <span class="c"># crea las tablas</span>
+    <h2><span class="n">04</span> La base de datos</h2>
+    <p>Un modelo es un struct plano. Con <code>table</code> declarado tienes query builder; el SQL a mano sigue disponible para lo que el builder no cubre.</p>
+    <pre>const auto adultos = co_await Query&lt;User&gt;()
+    .where(&amp;User::age, "&gt;", 18)
+    .orderBy(&amp;User::name)
+    .limit(10)
+    .get();
+
+User nuevo{.name = "Ada", .email = "ada@x.com", .age = 36};
+co_await save(nuevo);      <span class="c">// INSERT, y nuevo.id queda relleno</span></pre>
+  </section>
+
+  <section>
+    <h2><span class="n">05</span> Migraciones</h2>
+    <p>Son C++, asi que un error de esquema lo atrapa el compilador. Viven en <code>database/migrations/</code> y se declaran en <code>database/migrations.cpp</code>.</p>
+    <pre>void up(syrax::Schema&amp; schema) override {
+    schema.create("users", [](syrax::Table&amp; t) {
+        t.id();
+        t.string("name", 80);
+        t.string("email", 160).unique();
+        t.integer("age");
+        t.timestamps();
+    });
+}</pre>
+  </section>
+
+  <section>
+    <h2><span class="n">06</span> Comandos</h2>
+    <pre>syrax serve        <span class="c"># levanta y recompila al guardar</span>
+syrax migrate      <span class="c"># aplica lo pendiente</span>
 syrax db:seed      <span class="c"># datos de ejemplo</span>
-syrax test         <span class="c"># los tests que ya trae tests/</span>
-syrax serve        <span class="c"># recompila solo al guardar</span></pre>
+syrax test         <span class="c"># compila y corre tests/</span>
+syrax make:model   <span class="c"># modelo de Drogon para Mapper&lt;T&gt;</span></pre>
   </section>
 
   <footer>
-    Esta pagina es <code>public/index.html</code>. No la sirve el framework: es un
-    archivo estatico tuyo. Editala, o borrala.
+    El resto esta en el <a href="https://github.com/KeevDev/Syrax">README de Syrax</a>.
   </footer>
 
 </div>
@@ -1104,6 +1328,7 @@ inline constexpr File kProjectFiles[] = {
     {"docker/Dockerfile",                        kDockerfile},
     {".dockerignore",                            kDockerignore},
     {"public/index.html",                        kPublicIndex},
+    {"public/syrax.html",                        kPublicStarted},
     {"logs/.gitkeep",                            kGitkeep},
 
     {"src/main.cpp",                             kMain},

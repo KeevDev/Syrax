@@ -23,6 +23,21 @@ std::optional<Error> update(const Actor& actor, const Post& post) {
 }
 }  // namespace policies
 
+namespace controllers {
+
+Task<Result<PostResource>> update(Request req, std::int64_t id, UpdatePost body) {
+    const auto actor = actorFrom(req);
+
+    if (auto denied = requireRole(actor, "admin", "editor")) co_return *denied;
+
+    const Post post{.id = id, .authorId = actor.id};
+    if (auto denied = policies::update(actor, post)) co_return *denied;
+
+    co_return PostResource{.id = id, .title = body.title};
+}
+
+}  // namespace controllers
+
 struct User {
     std::int64_t id;
     std::string  name;
@@ -112,17 +127,7 @@ int main() {
     const bool ok   = auth::verifyPassword("secreto", hash);
     (void)ok;
 
-    app.post("/posts/{id}", [](Request req, std::int64_t id, UpdatePost body)
-                             -> Task<Result<PostResource>> {
-        const auto actor = actorFrom(req);
-
-        if (auto denied = requireRole(actor, "admin", "editor")) co_return *denied;
-
-        const Post post{.id = id, .authorId = actor.id};
-        if (auto denied = policies::update(actor, post)) co_return *denied;
-
-        co_return PostResource{.id = id, .title = body.title};
-    });
+    app.post("/posts/{id}", controllers::update);
 
     app.base(syrax::env("API_BASE", "/api/v1"));
 

@@ -5,12 +5,18 @@
 **Un framework de APIs para C++ moderno.** Construido sobre [Drogon](https://github.com/drogonframework/drogon) (HTTP) y [Glaze](https://github.com/stephenberry/glaze) (tipos y JSON).
 
 ```cpp
-app.post("/users", [](requests::CreateUser body) -> Task<Result<UserResource>> {
+// routes/v1.cpp — que expone la API
+api.post("/users", user::store).as("users.store");
+```
+
+```cpp
+// http/controllers/User/UserController.cpp — que hace la accion
+Task<Result<UserResource>> store(requests::CreateUser body) {
     const auto user = co_await service::create(std::move(body));
     if (!user) co_return Conflict("email already registered");
 
     co_return resources::from(*user);
-});
+}
 ```
 
 Eso es un endpoint completo: parseo del body, validación, manejo de errores, serialización de la respuesta y documentación OpenAPI. Sin macros, sin heredar de nada, sin anotaciones.
@@ -68,25 +74,56 @@ La primera compilación tarda unos minutos porque baja y compila Drogon; las sig
 
 ## Qué trae
 
-### Handlers tipados
+### Rutas y controladores
 
-La firma del handler es el contrato. Syrax deduce de ella qué parsear, qué validar y qué documentar.
+El mapa de la API vive en `routes/`. Una línea por endpoint: la ruta, el método del controlador que la atiende y, si quieres, un alias.
 
 ```cpp
-// Sin argumentos
-app.get("/users", []() -> Task<Result<std::vector<UserResource>>> { ... });
+// src/routes/v1.cpp
+void register_(syrax::Group api) {
+    api.get("/users", user::index).as("users.index");
+    api.post("/users", user::store).as("users.store");
 
-// Path param tipado
-app.get("/users/{id}", [](std::int64_t id) -> Task<Result<UserResource>> { ... });
-
-// Body JSON
-app.post("/users", [](requests::CreateUser body) -> Task<Result<UserResource>> { ... });
-
-// Path param y body a la vez: el body es siempre el ultimo argumento
-app.put("/users/{id}", [](std::int64_t id, requests::UpdateUser body) -> ... { ... });
+    api.get("/users/{id}", user::show).as("users.show");
+    api.put("/users/{id}", user::update).as("users.update");
+    api.del("/users/{id}", user::destroy).as("users.destroy");
+}
 ```
 
-Los handlers pueden ser síncronos (`Result<T>`) o corrutinas (`Task<Result<T>>`).
+El controlador son funciones normales, y **la firma es el contrato**: Syrax deduce de ella qué parsear, qué validar y qué documentar.
+
+```cpp
+// src/http/controllers/User/UserController.hpp
+namespace controllers::UserController {
+
+Task<Result<std::vector<resources::UserResource>>> index();
+Task<Result<resources::UserResource>>              show(std::int64_t id);
+Task<Result<resources::UserResource>>              store(requests::CreateUser body);
+Task<Result<resources::UserResource>>              update(std::int64_t id,
+                                                          requests::UpdateUser body);
+Task<Result<resources::DeletedResource>>           destroy(std::int64_t id);
+
+}  // namespace controllers::UserController
+```
+
+Sin argumentos, con path param tipado, con body JSON, o con los dos: **el body es siempre el último argumento**. Pueden ser síncronos (`Result<T>`) o corrutinas (`Task<Result<T>>`). Ni la ruta ni el controlador se enteran del otro más de lo necesario: cambiar la URL o versionar la API no toca una línea del controlador.
+
+De ahí para adentro el flujo es el que todo el mundo reconoce, y ninguna de esas capas la conoce el framework — son archivos C++ normales:
+
+```
+routes/  ->  http/controllers/  ->  services/  ->  repositories/  ->  models/
+la URL       el transporte          el negocio     el SQL            la tabla
+```
+
+`syrax new` lo deja montado con un CRUD completo dentro; está explicado entero en [estructura de un proyecto](#estructura-de-un-proyecto).
+
+**Para algo de una línea, la lambda sigue valiendo.** Un `/health` no necesita cuatro archivos:
+
+```cpp
+app.get("/health", []() -> Result<Status> { return Status{.status = "ok"}; });
+```
+
+Es la misma maquinaria: lo que Syrax mira es la firma, no dónde esté escrita.
 
 ### Errores como valores
 
@@ -104,7 +141,7 @@ Incluso las rutas inexistentes responden JSON, no la página HTML de Drogon.
 
 ### Validación
 
-El body se parsea en modo estricto antes de que el handler se ejecute. Si algo no cuadra, el cliente recibe un **422** y el handler nunca corre:
+El body se parsea en modo estricto antes de que el controlador se ejecute. Si algo no cuadra, el cliente recibe un **422** y el controlador nunca corre:
 
 | | |
 |---|---|
@@ -215,7 +252,7 @@ co_return co_await db::transaction(
 
 `Tx` tiene las mismas cuatro operaciones que `db`. Si el cuerpo lanza, se deshace entera antes de propagar; `tx.rollback()` aborta sin lanzar, para cuando abortar es una decisión de negocio. Es lo que usa el repositorio que genera `syrax new`.
 
-**El COMMIT se espera.** Drogon confirma la transacción al destruirla, en otro hilo: si falla —un deadlock, un *serialization failure*, una clave ajena diferida— eso ocurre **después** de que tu handler devolvió el 201, y nadie se entera. Syrax espera esa confirmación y lanza `db::CommitFailed` si no llegó, así que un COMMIT roto sale por donde salen los demás errores y no como una fila que no está.
+**El COMMIT se espera.** Drogon confirma la transacción al destruirla, en otro hilo: si falla —un deadlock, un *serialization failure*, una clave ajena diferida— eso ocurre **después** de que tu controlador devolvió el 201, y nadie se entera. Syrax espera esa confirmación y lanza `db::CommitFailed` si no llegó, así que un COMMIT roto sale por donde salen los demás errores y no como una fila que no está.
 
 #### Query builder tipado
 
@@ -379,18 +416,18 @@ schema.table("users", [](Blueprint& t) {
 });
 ```
 
-> **`.change()` solo funciona en Postgres.** SQLite únicamente soporta `RENAME`, `ADD COLUMN` y `DROP COLUMN`; cambiar un tipo exige reconstruir la tabla entera. Syrax lanza un error que lo dice y apunta a `Schema::raw()` en vez de generar SQL que el motor va a rechazar. Es una limitación de SQLite, no de Syrax.
+> **`.change()` no existe en SQLite.** Postgres y MySQL lo soportan —cada uno con su sintaxis, que Syrax escribe por ti—; SQLite únicamente tiene `RENAME`, `ADD COLUMN` y `DROP COLUMN`, así que cambiar un tipo exige reconstruir la tabla entera. Syrax lanza un error que lo dice y apunta a `Schema::raw()` en vez de generar SQL que el motor va a rechazar. Es una limitación de SQLite, no de Syrax.
 
 ### OpenAPI automático
 
-`/openapi.json` y `/docs` con Swagger UI, generados de las rutas registradas. **Los esquemas salen de los mismos tipos que usan los handlers**, así que la documentación no puede desincronizarse del código: no hay anotaciones que mantener.
+`/openapi.json` y `/docs` con Swagger UI, generados de las rutas registradas. **Los esquemas salen de los mismos tipos que usan los controladores**, así que la documentación no puede desincronizarse del código: no hay anotaciones que mantener.
 
 ```cpp
 app.docs("Mi API", "2.0.0");   // titulo y version
 app.withoutDocs();             // apagarlo en produccion
 ```
 
-Eso incluye los path params: un handler `[](std::int64_t id)` documenta `{id}` como `integer`, no como `string`. El tipo lo pone la firma, igual que el resto.
+Eso incluye los path params: un controlador que declara `show(std::int64_t id)` documenta `{id}` como `integer`, no como `string`. El tipo lo pone la firma, igual que el resto.
 
 Y el documento se puede sacar sin levantar el servidor, para volcarlo en CI o generar clientes:
 
@@ -513,14 +550,16 @@ const bool ok   = auth::verifyPassword("secreto", hash);
 `auth::bearer()` verifica el token y deja el sujeto y el rol en la petición. De ahí sale el actor:
 
 ```cpp
-app.post("/posts/{id}", [](Request req, std::int64_t id, UpdatePost body)
-                         -> Task<Result<PostResource>> {
+// http/controllers/Post/PostController.cpp
+Task<Result<PostResource>> update(Request req, std::int64_t id, UpdatePost body) {
     const auto actor = actorFrom(req);
 
     if (auto denied = requireRole(actor, "admin", "editor")) co_return *denied;
     // ...
-});
+}
 ```
+
+`Request` es opcional y va primero; el body, último. Un controlador que no necesita la petición cruda no la declara.
 
 Una **política** es solo una función que devuelve `optional<Error>`. No hay registro ni resolución por nombre:
 
@@ -601,31 +640,12 @@ tests/
 └── user_test.cpp         un test de verdad, para copiar y seguir
 ```
 
-**Por qué la ruta no vive en el controlador:** `routes/v1.cpp` se lee de un vistazo y dice qué expone esta versión de la API; el controlador dice qué hace cada acción. Un handler es una función normal, así que la ruta lo nombra y ya:
+**Por qué la ruta no vive en el controlador:** `routes/v1.cpp` se lee de un vistazo y dice qué expone esta versión de la API; el controlador dice qué hace cada acción. Cómo se escriben los dos está arriba, en [rutas y controladores](#rutas-y-controladores); aquí solo falta de dónde sale el prefijo, que es de la configuración:
 
 ```cpp
-// routes/routes.cpp — la base sale de bootstrap, aqui solo se usa
+// routes/routes.cpp — la base se declara en bootstrap, aqui solo se usa
 routes::v1::register_(app.api());
 ```
-
-```cpp
-// routes/v1.cpp — relativo a esa base
-void register_(syrax::Group api) {
-    api.get("/users", user::index).as("users.index");
-    api.get("/users/{id}", user::show).as("users.show");
-}
-```
-
-```cpp
-Task<Result<UserResource>> show(std::int64_t id) {   // el controlador
-    const auto user = co_await service::byId(id);
-    if (!user) co_return NotFound("user not found");
-
-    co_return resources::from(*user);
-}
-```
-
-Syrax deduce de esa firma el path param, el body a parsear y el esquema que documenta, igual que con una lambda. Cambiar la URL o versionar la API no toca el controlador.
 
 **Grupos y alias.** `app.api()` es el grupo de la base; `group()` anida (`app.api().group("/admin")`), y `as()` le pone nombre a una ruta para no volver a escribirla:
 
@@ -703,11 +723,12 @@ CI en GitHub Actions, en cada push y PR:
 
 Las digo aquí en vez de que las descubras tú:
 
-- **`.change()` de columnas solo en Postgres.** SQLite no tiene `ALTER COLUMN`: cambiar un tipo o una restricción exige reconstruir la tabla. Syrax lanza un error que lo explica en vez de generar SQL que el motor va a rechazar.
+- **`.change()` de columnas no va en SQLite.** El motor no tiene `ALTER COLUMN`: cambiar un tipo o una restricción exige reconstruir la tabla. Syrax lanza un error que lo explica en vez de generar SQL que el motor va a rechazar. En Postgres y MySQL funciona.
 - **`syrax migrate` compila.** Las migraciones son C++, así que hay un build de por medio. Es el precio de que una migración pueda usar tus tipos y que un error de esquema lo atrape el compilador; con `ccache` la recompilación es de segundos.
 - **Un middleware no ve el body *tipado*.** Corre antes del parseo: alcanza los bytes crudos por `request.drogon()->getBody()`, pero no el struct ya validado. Para reglas que dependen del contenido está `rules()`.
 - **`Room` es de un solo proceso.** Un broadcast alcanza a las conexiones de *esta* instancia. Con varias réplicas detrás de un balanceador hace falta un bus externo, que Syrax no trae.
-- **Sin colas ni cache.** Son [no-objetivos](#no-objetivos) deliberados, no pendientes.
+- **El cache es un Redis, no una capa de cache.** `cache::` configura el cliente de Drogon y le pone encima `get`/`put`/`forget`/`remember`. No hay drivers intercambiables, tags, ni invalidación por dependencias: para eso está el cliente crudo.
+- **Sin colas ni jobs.** Son [no-objetivos](#no-objetivos) deliberados, no pendientes.
 - **`ccache` solo acierta si el directorio de build es el mismo.** FetchContent deja Drogon *dentro* de `build/`, así que sus rutas de include forman parte de cada compilación: dos directorios distintos son dos entradas distintas y la caché no sirve. Borrar y rehacer `build/` en el mismo sitio sí acierta al 100%. Con `CCACHE_BASEDIR` se puede sortear, pero eso es configuración tuya, no del proyecto.
 - **Pre-1.0.** La API puede cambiar sin aviso.
 
@@ -718,12 +739,12 @@ Joins y relaciones  Colas / Jobs        Scheduler
 Lazy / eager load   Event bus           Service discovery
 Mail                gRPC                Load balancing
                     Storage / S3        Circuit breakers
-                    Cache distribuida   Broker de sockets
+                    Drivers de cache    Broker de sockets
 ```
 
 Syrax compone; no reemplaza. Si tu proyecto necesita algo de esto, tómalo de una librería existente.
 
-**Regla de admisión:** una feature entra sólo si hace *notablemente más fácil crear una API*, y si es superficie finita. Un schema builder es finito (11 tipos de columna por 2 dialectos). Un query builder sin joins también: filtrar, ordenar, paginar, guardar y borrar. Con relaciones —lazy loading, cascadas, el N+1— deja de serlo, y por eso `Query<T>` se planta justo ahí.
+**Regla de admisión:** una feature entra sólo si hace *notablemente más fácil crear una API*, y si es superficie finita. Un schema builder es finito (11 tipos de columna por 3 dialectos). Un query builder sin joins también: filtrar, ordenar, paginar, guardar y borrar. Con relaciones —lazy loading, cascadas, el N+1— deja de serlo, y por eso `Query<T>` se planta justo ahí.
 
 ---
 
@@ -733,14 +754,15 @@ Syrax compone; no reemplaza. Si tu proyecto necesita algo de esto, tómalo de un
 ┌──────────────────────────────────────────────────┐
 │  Tu aplicación                                   │
 ├──────────────────────────────────────────────────┤
-│  SYRAX  ← ~3200 lineas de cabeceras              │
+│  SYRAX  ← ~4200 lineas de cabeceras              │
 │                                                  │
 │  Ruteo con deducción de tipos desde la firma     │
 │  Binding request → struct, y reglas por campo    │
 │  Errores → respuesta JSON uniforme               │
 │  Mapeo fila de BD → struct, por reflection       │
 │  Query builder tipado sobre ese mismo struct     │
-│  Schema builder y migraciones                    │
+│  Schema builder y migraciones, en los 3 motores  │
+│  Configuracion y cache en Redis                  │
 │  Generación de OpenAPI                           │
 │  Middleware, JWT, políticas                      │
 │  WebSockets con broadcast                        │

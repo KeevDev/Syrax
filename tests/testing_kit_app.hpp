@@ -121,11 +121,28 @@ inline syrax::App create() {
     app.base("/api/v1");
     app.etag();
 
+    // Sin Redis, claim() devuelve Unavailable y la peticion sigue como si la
+    // cabecera no estuviera: se puede montar siempre.
+    app.idempotency();
+    app.partial();
+
     auto api = app.api();
 
     api.get("/widgets", []() -> syrax::Task<syrax::Result<std::vector<models::Widget>>> {
         co_return co_await repository::all();
     }).as("widgets.index");
+
+    api.get("/paginados",
+            [](const syrax::Request& request) -> syrax::Task<syrax::Result<syrax::Page<models::Widget>>> {
+                const auto page = request.query("page");
+                const auto per  = request.query("per_page");
+
+                co_return co_await syrax::Query<models::Widget>()
+                    .orderBy(&models::Widget::id)
+                    .paginate(page.empty() ? 1 : std::stoll(page),
+                              per.empty() ? 2 : std::stoll(per));
+            })
+        .as("widgets.paginados");
 
     api.get("/widgets/{id}",
             [](std::int64_t id) -> syrax::Task<syrax::Result<models::Widget>> {

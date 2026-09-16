@@ -6,7 +6,9 @@
 
 #include <syrax/db.hpp>
 #include <syrax/errors.hpp>
+#include <syrax/fields.hpp>
 #include <syrax/health.hpp>
+#include <syrax/idempotency.hpp>
 #include <syrax/log.hpp>
 #include <syrax/middleware.hpp>
 #include <syrax/validation.hpp>
@@ -245,6 +247,9 @@ inline std::string etagOf(std::string_view body) {
     out += '"';
     return out;
 }
+
+// Donde viaja la clave de idempotencia entre los dos advices.
+inline constexpr std::string_view kIdempotencyKey = "syrax.idempotency.key";
 
 inline drogon::HttpResponsePtr makeError(int status, std::string message) {
     return render(Error{status, std::move(message)});
@@ -603,6 +608,162 @@ public:
                     resp->setStatusCode(drogon::k304NotModified);
                     resp->setBody("");
                 }
+            });
+        return *this;
+    }
+
+    // Reintentos seguros con `Idempotency-Key`.
+    //
+    // Va por advices y no por la cadena de middleware porque necesita las dos
+    // mitades: cortar ANTES del handler devolviendo una respuesta guardada
+    // entera —no un Error, que es lo unico que un middleware puede devolver— y
+    // ver DESPUES la respuesta para guardarla.
+    App& idempotency(idempotency::Options options = {}) {
+        drogon::app().registerPreHandlingAdvice(
+            [options](const drogon::HttpRequestPtr& req, drogon::AdviceCallback&& respond,
+                      drogon::AdviceChainCallback&& next) {
+                const auto clave = req->getHeader(options.header);
+                const auto metodo = std::string{req->methodString()};
+
+                const bool aplica =
+                    !clave.empty() &&
+                    std::ranges::find(options.methods, metodo) != options.methods.end();
+
+                if (!aplica) {
+                    next();
+                    return;
+                }
+
+                // La huella va sobre el cuerpo, que es lo que identifica la
+                // operacion. Sin ella, la misma clave con otro cuerpo
+                // devolveria la respuesta de una operacion distinta.
+                const auto huella = idempotency::detail::sha256Hex(req->body());
+
+                // Se guarda en el request para que el advice de salida sepa
+                // bajo que clave guardar sin volver a leer la cabecera.
+                req->attributes()->insert(std::string{detail::kIdempotencyKey}, clave);
+
+                drogon::async_run([options, clave, huella, respond = std::move(respond),
+                                   next = std::move(next)]() mutable -> drogon::Task<> {
+                    const auto tomada =
+                        co_await idempotency::claim(clave, huella, options.ttl, options.on);
+
+                    switch (tomada.state) {
+                        case idempotency::Claim::Replay: {
+                            auto resp = drogon::HttpResponse::newHttpResponse();
+                            resp->setStatusCode(
+                                static_cast<drogon::HttpStatusCode>(tomada.stored.status));
+                            resp->setContentTypeCode(drogon::CT_APPLICATION_JSON);
+                            resp->setBody(tomada.stored.body);
+                            resp->addHeader("Idempotent-Replay", "true");
+                            applyResponseChain(resp);
+                            respond(resp);
+                            co_return;
+                        }
+
+                        case idempotency::Claim::InProgress:
+                            respond(render(Error{.status  = 409,
+                                                 .message = "otra peticion con esa "
+                                                            "Idempotency-Key sigue en curso",
+                                                 .code    = "idempotency_in_progress"}));
+                            co_return;
+
+                        case idempotency::Claim::Mismatch:
+                            respond(render(Error{
+                                .status  = 422,
+                                .message = "esa Idempotency-Key ya se uso con otro cuerpo",
+                                .code    = "idempotency_key_reused",
+                                .detail  = "una clave identifica UNA operacion: para otra "
+                                           "distinta, manda una clave distinta"}));
+                            co_return;
+
+                        // Sin Redis no hay proteccion, pero tampoco se cae la
+                        // API: se sigue como si la cabecera no estuviera.
+                        case idempotency::Claim::Unavailable:
+                        case idempotency::Claim::Owned:
+                            next();
+                            co_return;
+                    }
+                });
+            });
+
+        drogon::app().registerPostHandlingAdvice(
+            [options](const drogon::HttpRequestPtr& req, const drogon::HttpResponsePtr& resp) {
+                if (!req->attributes()->find(std::string{detail::kIdempotencyKey})) return;
+
+                const auto clave =
+                    req->attributes()->get<std::string>(std::string{detail::kIdempotencyKey});
+                const auto status = static_cast<int>(resp->statusCode());
+
+                // Un 5xx no se guarda y ademas suelta la clave: el fallo fue
+                // del servidor, asi que el cliente tiene que poder reintentar.
+                if (status >= 500) {
+                    drogon::async_run([options, clave]() -> drogon::Task<> {
+                        co_await idempotency::release(clave, options.on);
+                    });
+                    return;
+                }
+
+                // El 409 y el 422 que genera este mismo mecanismo no se
+                // guardan: son respuestas SOBRE la clave, no resultados de la
+                // operacion, y guardarlas dejaria la clave envenenada.
+                if (status == 409 || status == 422) {
+                    const auto body = std::string{resp->body()};
+                    if (body.find("idempotency_") != std::string::npos) return;
+                }
+
+                idempotency::Stored guardar{
+                    .fingerprint = idempotency::detail::sha256Hex(req->body()),
+                    .status      = status,
+                    .body        = std::string{resp->body()},
+                };
+
+                drogon::async_run([options, clave, guardar]() -> drogon::Task<> {
+                    co_await idempotency::save(clave, guardar, options.ttl, options.on);
+                });
+            });
+        return *this;
+    }
+
+    // Serializacion parcial: `?fields=id,name`.
+    //
+    // Va por PostHandling, sobre el JSON ya escrito, y no por reflexion en el
+    // momento de serializar. La reflexion seria mas barata —los nombres estan
+    // en tiempo de compilacion— pero obligaria a meter el request en makeOk, o
+    // sea en TODOS los caminos de registro, para una feature que solo se usa
+    // cuando el cliente la pide. Esto cuesta un parse extra de la respuesta
+    // unicamente en esas peticiones, y cero en las demas.
+    App& partial(fields::Options options = {}) {
+        drogon::app().registerPostHandlingAdvice(
+            [options](const drogon::HttpRequestPtr& req, const drogon::HttpResponsePtr& resp) {
+                // Solo respuestas de exito: filtrarle los campos a un error
+                // dejaria al cliente sin el mensaje que explica el error.
+                if (resp->statusCode() < drogon::k200OK ||
+                    resp->statusCode() >= drogon::k300MultipleChoices) {
+                    return;
+                }
+
+                const auto raw = req->getParameter(options.param);
+                if (raw.empty()) return;
+
+                const auto pedidos = fields::parse(raw);
+
+                bool desconocidos = false;
+                const auto filtrado = fields::apply(resp->body(), pedidos, desconocidos);
+
+                if (desconocidos) {
+                    const auto error = render(Error{
+                        .status  = 400,
+                        .message = "ninguno de los campos pedidos existe en este recurso",
+                        .code    = "unknown_fields",
+                        .detail  = "?" + options.param + "=" + raw});
+
+                    resp->setStatusCode(drogon::k400BadRequest);
+                    resp->setBody(std::string{error->body()});
+                    return;
+                }
+
+                if (filtrado) resp->setBody(*filtrado);
             });
         return *this;
     }

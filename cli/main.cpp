@@ -57,6 +57,7 @@ constexpr Alias kAliases[] = {
     {"m:a", "make:api"},           {"m:c", "make:controller"},
     {"m:s:v", "make:service"},     {"m:rp", "make:repository"},
     {"m:j", "make:job"},           {"m:mg", "make:migration"},
+    {"sch", "schedule:work"},      {"sch:l", "schedule:list"},
     {"u", "upgrade"},              {"-u", "upgrade"},      {"--upgrade", "upgrade"},
     {"v", "version"},              {"-v", "version"},      {"--version", "version"},
     {"h", "help"},                 {"-h", "help"},         {"--help", "help"},
@@ -1179,6 +1180,8 @@ int usage() {
         "  queue:work                            work corre los jobs encolados\n"
         "  queue:failed                          q:f  lista los que se rindieron\n"
         "  queue:retry                           q:r  devuelve los fallidos a la cola\n"
+        "  schedule:work                         sch  encola las tareas periodicas cuando toca\n"
+        "  schedule:list                        sch:l dice que hay programado, sin levantar nada\n"
         "  test                                  t    compila y corre los tests\n"
         "\n"
         "  upgrade                               -u   recompila e instala la ultima version\n"
@@ -1239,6 +1242,8 @@ int main(int argc, char** argv) {
     if (cmd == "queue:work")       return cmdMigrate("queue:work");
     if (cmd == "queue:failed")     return cmdMigrate("queue:failed");
     if (cmd == "queue:retry")      return cmdMigrate("queue:retry");
+    if (cmd == "schedule:work")    return cmdMigrate("schedule:work");
+    if (cmd == "schedule:list")    return cmdMigrate("schedule:list");
     if (cmd == "make:model" || cmd == "m:m") {
         return cmdMakeModel(argc > 2 ? argv[2] : "");
     }

@@ -665,6 +665,7 @@ La configuración de un proyecto vive en `src/bootstrap/`, un archivo por cosa q
 src/bootstrap/
 ├── app.cpp         junta todo: base de la API, y llama a las de abajo
 ├── config.cpp      toda la configuración, tipada y validada al arrancar
+├── schedule.cpp    las tareas periódicas
 ├── database.cpp    la conexión a la base
 ├── cache.cpp       el Redis, si lo enciendes
 ├── queue.cpp       el driver de la cola y los jobs registrados
@@ -891,6 +892,84 @@ Dos decisiones que conviene saber:
 
 - **La ventana es fija**, con su índice dentro de la clave. En el peor caso —una ráfaga al final de una ventana y otra al principio de la siguiente— pasan hasta 2x el límite en un intervalo corto. La alternativa deslizante cuesta una entrada por petición; para proteger de abuso, la fija sobra.
 - **Si Redis no responde, la petición pasa.** Un limitador que tumba la API cuando se cae su almacén convierte una degradación en una caída, y existe para proteger la API, no para ser otro motivo de que no funcione.
+
+---
+
+### Paginación
+
+```cpp
+co_return co_await syrax::Query<models::User>()
+              .orderBy(&models::User::id)
+              .paginate(page, perPage);
+```
+
+Devuelve un `Page<T>` —`data`, `total`, `page`, `perPage`, `pages`, `hasMore`— y OpenAPI lo documenta solo, porque sale del mismo tipo. `pages` y `hasMore` se calculan aquí a propósito: son la división entera que en el cliente alguien redondea mal.
+
+Son **dos consultas**, el `count` y el `select`: no hay forma de hacerlo en una sin window functions, que SQLite y los MySQL viejos no tienen. En una tabla grande el caro es el `count(*)`.
+
+Sin `orderBy` el orden lo decide el motor y puede cambiar entre páginas —la fila que estaba en la 1 reaparece en la 2—, pero no se impone: la clave de orden es del que consulta.
+
+---
+
+### Serialización parcial
+
+```cpp
+app.partial();
+```
+
+```
+GET /api/v1/users?fields=id,name
+[{"id":1,"name":"Ada"}, ...]
+```
+
+Sobre una página filtra **dentro de `data`** y deja el sobre entero, para que el cliente no pierda `total` ni `page` por pedir dos campos. Un nombre que no existe se ignora; si no existe **ninguno**, es un 400: un `?fields=nombre` donde el campo es `name` devolvería `[{},{},{}]`, y el cliente no tendría forma de saber que se equivocó.
+
+Se para ahí. Lo siguiente que pide todo el mundo es anidar —`fields=user{name,posts{title}}`— y eso ya no es un parámetro, es un lenguaje de consulta con su parser y su problema N+1. Si hace falta eso, hace falta GraphQL.
+
+---
+
+### Reintentos seguros
+
+El cliente manda `POST /pedidos`, la red se corta antes de que vuelva la respuesta, el cliente reintenta. Ahora hay dos pedidos y se ha cobrado dos veces. No es un caso raro: es lo que pasa cada vez que un móvil cambia de wifi a datos a mitad de una petición.
+
+```cpp
+app.idempotency();   // necesita Redis
+```
+
+```
+POST /api/v1/pedidos
+Idempotency-Key: 7f3c...
+```
+
+La primera vez se ejecuta y se guarda el resultado; el reintento con la misma clave devuelve esa respuesta, con `Idempotent-Replay: true`, sin volver a ejecutar nada.
+
+Tres detalles que son la diferencia entre que esto funcione y que haga daño:
+
+- **La misma clave con otro cuerpo es un 422**, no un replay. Si no, un cliente que reusa la clave por descuido recibe la respuesta de un pedido distinto y se queda tan tranquilo.
+- **Dos peticiones simultáneas con la misma clave**: la segunda recibe un 409. Sin eso, la condición de carrera que se venía a cerrar sigue abierta.
+- **Un 5xx suelta la clave.** Si el servidor falló por su cuenta, el cliente tiene que poder reintentar; dejarla tomada convertiría un error transitorio en un bloqueo hasta que venza el TTL.
+
+---
+
+### Tareas periódicas
+
+Era no-objetivo mientras no había colas. Lo que cambia con la cola es que ya existe el sitio donde poner el trabajo: el scheduler no ejecuta nada, **encola**, y a partir de ahí la tarea es un job como los demás, con sus reintentos y su registro de fallos.
+
+```cpp
+// src/bootstrap/schedule.cpp
+syrax::schedule::every(std::chrono::minutes{5}).dispatch(PurgeSessions{});
+syrax::schedule::dailyAt("03:00").dispatch(NightlyReport{});
+syrax::schedule::hourlyAt(30).onQueue("informes").dispatch(Rollup{});
+```
+
+```bash
+syrax schedule:work     # encola cuando toca
+syrax schedule:list     # qué hay programado, sin levantar nada
+```
+
+**No hay expresiones cron** a propósito: un `*/15 9-17 * * 1-5` es un lenguaje entero, y escribirlo mal no da un error, da una tarea que corre cuando no toca. `dailyAt("3:00")` sí da un error.
+
+Tres cosas antes de montarlo: corre **una sola instancia** (dos schedulers encolan cada tarea dos veces, y no hay cerrojo distribuido); una tarea perdida **no se recupera** (si el proceso estaba caído a las 03:00, la siguiente es mañana); y la hora es la **local del proceso**, así que conviene fijarle el `TZ` al contenedor.
 
 ---
 
@@ -1186,6 +1265,8 @@ Agregar un archivo a `tests/` no obliga a tocar ningún CMake, y `database/facto
 | `syrax db` | | consola del motor configurado, con las credenciales del `.env` |
 | `syrax redis` | | consola de Redis, con las del `.env` |
 | `syrax cache:clear` | `c:c` | vacía la base de Redis configurada (pregunta antes) |
+| `syrax schedule:work` | `sch` | encola las tareas periódicas cuando toca |
+| `syrax schedule:list` | `sch:l` | dice qué hay programado, sin levantar nada |
 | `syrax test` | `t` | compila y corre `ctest` (ver nota abajo) |
 | `syrax upgrade` | `-u` | recompila e instala la última versión |
 | `syrax version` | `-v` | versión y origen |
@@ -1226,7 +1307,7 @@ Las digo aquí en vez de que las descubras tú:
 - **`Room` es de un solo proceso.** Un broadcast alcanza a las conexiones de *esta* instancia. Con varias réplicas detrás de un balanceador hace falta un bus externo, que Syrax no trae.
 - **El cache es un Redis, no una capa de cache.** `cache::` configura el cliente de Drogon y le pone encima `get`/`put`/`forget`/`remember`. No hay drivers intercambiables, tags, ni invalidación por dependencias: para eso está el cliente crudo.
 - **Un job corre al menos una vez.** Si el worker muere con uno en la mano, vuelve a la cola cuando vence `QUEUE_RETRY_AFTER`. No hay forma barata de prometer "exactamente una vez", así que Syrax no la promete.
-- **Sin scheduler.** Un job se difiere (`jobs::in(...)`), pero no hay cron: para eso está cron.
+- **El scheduler corre una sola instancia.** No hay cerrojo distribuido: dos procesos de `schedule:work` encolan cada tarea dos veces. En Kubernetes, `replicas: 1` en ese deployment.
 - **`ccache` solo acierta si el directorio de build es el mismo.** FetchContent deja Drogon *dentro* de `build/`, así que sus rutas de include forman parte de cada compilación: dos directorios distintos son dos entradas distintas y la caché no sirve. Borrar y rehacer `build/` en el mismo sitio sí acierta al 100%. Con `CCACHE_BASEDIR` se puede sortear, pero eso es configuración tuya, no del proyecto.
 - **Pre-1.0.** La API puede cambiar sin aviso.
 

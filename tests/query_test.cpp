@@ -504,3 +504,100 @@ TEST_CASE("lo que hace el builder en una transaccion se deshace con ella", "[que
     CHECK(drogon::sync_wait(
               Query<User>(db.get()).where(&User::name, "=", std::string{"linus"}).count()) == 1);
 }
+
+// ------------------------------------------------------------- paginacion
+
+TEST_CASE("paginate devuelve la pagina y el total", "[query][paginate]") {
+    SqliteDialect dialect;
+    TempDb        db;
+
+    // Hay 4 usuarios en el fixture.
+    const auto pagina = drogon::sync_wait(
+        Query<User>(db.get()).orderBy(&User::id).paginate(/*page=*/1, /*perPage=*/2));
+
+    CHECK(pagina.data.size() == 2);
+    CHECK(pagina.data.front().name == "ada");
+
+    // El total es el de TODAS las filas que cumplen el filtro, no el de la
+    // pagina: sin eso no se puede pintar un paginador.
+    CHECK(pagina.total == 4);
+    CHECK(pagina.page == 1);
+    CHECK(pagina.perPage == 2);
+    CHECK(pagina.pages == 2);
+    CHECK(pagina.hasMore);
+}
+
+TEST_CASE("la ultima pagina dice que no hay mas", "[query][paginate]") {
+    SqliteDialect dialect;
+    TempDb        db;
+
+    const auto ultima = drogon::sync_wait(Query<User>(db.get()).orderBy(&User::id).paginate(2, 2));
+
+    CHECK(ultima.data.size() == 2);
+    CHECK(ultima.data.front().name == "grace");
+    CHECK_FALSE(ultima.hasMore);
+}
+
+TEST_CASE("los filtros cuentan para el total, no solo para la pagina", "[query][paginate]") {
+    SqliteDialect dialect;
+    TempDb        db;
+
+    // Tres mayores de edad de los cuatro.
+    const auto pagina =
+        drogon::sync_wait(Query<User>(db.get()).where(&User::age, ">", 18).orderBy(&User::id).paginate(1, 2));
+
+    CHECK(pagina.total == 3);
+    CHECK(pagina.pages == 2);
+    CHECK(pagina.data.size() == 2);
+}
+
+TEST_CASE("una pagina pasada del final sale vacia, no rota", "[query][paginate]") {
+    SqliteDialect dialect;
+    TempDb        db;
+
+    // Es lo que pasa cuando alguien borra filas mientras otro pagina.
+    const auto vacia = drogon::sync_wait(Query<User>(db.get()).paginate(99, 10));
+
+    CHECK(vacia.data.empty());
+    CHECK(vacia.total == 4);
+    CHECK_FALSE(vacia.hasMore);
+}
+
+TEST_CASE("una tabla vacia da una pagina vacia y cero paginas", "[query][paginate]") {
+    SqliteDialect dialect;
+    TempDb        db;
+
+    const auto vacia = drogon::sync_wait(Query<Doc>(db.get()).paginate(1, 10));
+
+    CHECK(vacia.data.empty());
+    CHECK(vacia.total == 0);
+    CHECK(vacia.pages == 0);
+    CHECK_FALSE(vacia.hasMore);
+}
+
+TEST_CASE("una pagina que no existe se corrige en vez de romper el SQL", "[query][paginate]") {
+    SqliteDialect dialect;
+    TempDb        db;
+
+    // Un ?page=0 es siempre un parametro mal leido, y un OFFSET negativo seria
+    // un error de SQL en vez de una respuesta.
+    const auto cero = drogon::sync_wait(Query<User>(db.get()).orderBy(&User::id).paginate(0, 2));
+
+    CHECK(cero.page == 1);
+    CHECK(cero.data.size() == 2);
+
+    const auto negativa = drogon::sync_wait(Query<User>(db.get()).paginate(-5, -5));
+    CHECK(negativa.page == 1);
+    CHECK(negativa.perPage == 1);
+}
+
+TEST_CASE("el numero de paginas redondea hacia arriba", "[query][paginate]") {
+    SqliteDialect dialect;
+    TempDb        db;
+
+    // 4 filas de 3 en 3 son dos paginas, no una: es la division entera que en
+    // el cliente alguien redondea mal.
+    CHECK(drogon::sync_wait(Query<User>(db.get()).paginate(1, 3)).pages == 2);
+    CHECK(drogon::sync_wait(Query<User>(db.get()).paginate(1, 4)).pages == 1);
+    CHECK(drogon::sync_wait(Query<User>(db.get()).paginate(1, 1)).pages == 4);
+}

@@ -48,7 +48,9 @@
 #include <chrono>
 #include <concepts>
 #include <cstdint>
+#include <cerrno>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <functional>
 #include <optional>
@@ -394,6 +396,18 @@ private:
             if (auto* self = instance()) self->stop();
         });
 
+        // El aviso de arranque no basta para dar el servidor por listo. En
+        // Linux, Drogon abre UN listener por hilo de IO con SO_REUSEPORT, y el
+        // kernel reparte las conexiones entre todos: una que caiga en un
+        // socket que todavia no llamo a listen() se rechaza con
+        // ECONNREFUSED. El sintoma es un test que falla una vez cada muchas y
+        // solo cuando la maquina va cargada, que es el peor tipo de fallo.
+        //
+        // Se comprueba conectando de verdad en vez de dormir un rato fijo: un
+        // sleep que alcanza en un portatil no alcanza en un CI cargado, y uno
+        // que alcanza siempre le suma ese tiempo a cada binario de test.
+        waitUntilAccepting();
+
         // El cliente de la base se pide despues de run(), que es cuando Drogon
         // crea los que registro bootstrap::database().
         db_ = db::client();
@@ -402,6 +416,42 @@ private:
                 "syrax::testing: la aplicacion no registro ninguna conexion 'default'. "
                 "Comprueba que create() llame a la funcion que hace db::connect().");
         }
+    }
+
+    // Conecta y cuelga, hasta que el servidor acepte de verdad. Se piden
+    // varias seguidas a proposito: con SO_REUSEPORT el kernel reparte entre
+    // los listeners, asi que una sola que funcione no prueba que esten todos.
+    void waitUntilAccepting() {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+
+        int seguidas = 0;
+        while (seguidas < 8 && std::chrono::steady_clock::now() < deadline) {
+            if (probe()) {
+                ++seguidas;
+                continue;
+            }
+            seguidas = 0;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+
+        if (seguidas < 8) {
+            throw std::runtime_error("syrax::testing: el servidor levanto en el puerto " +
+                                     std::to_string(port_) + " pero no acepta conexiones");
+        }
+    }
+
+    bool probe() const {
+        const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0) return false;
+
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port   = ::htons(port_);
+        ::inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+
+        const bool ok = ::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
+        ::close(fd);
+        return ok;
     }
 
     void stop() {
@@ -436,9 +486,14 @@ private:
         ::inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
 
         if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+            const int fallo = errno;
             ::close(fd);
+
+            // El mensaje lleva errno porque los dos motivos habituales piden
+            // cosas distintas: un ECONNREFUSED es que el servidor no esta, y un
+            // EADDRNOTAVAIL es que la maquina se quedo sin puertos efimeros.
             throw std::runtime_error("syrax::testing: no se pudo conectar al puerto " +
-                                     std::to_string(port_));
+                                     std::to_string(port_) + ": " + std::strerror(fallo));
         }
 
         std::string request;

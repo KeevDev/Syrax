@@ -59,6 +59,10 @@ qué se cerró; lo que sigue pendiente está en el nivel 2.
 | **Rate limit con Redis** | `rateLimitShared()`, sobre una cadena de middleware asíncrona nueva (`useAsync`). Ventana fija con el índice en la clave; si Redis no responde, la petición pasa. Los dos limitadores aceptan una función de clave: por IP de fábrica, por cabecera o por usuario si se pide. |
 | **ETag / 304** | `app.etag()`: SHA-256 truncado del cuerpo en cada GET de éxito, y 304 sin cuerpo si el `If-None-Match` coincide. |
 | **CLI: `db`, `redis`, `cache:clear`** | Consolas con las credenciales del `.env` ya puestas, para los tres motores. `cache:clear` pregunta antes, porque `FLUSHDB` no distingue lo de Syrax de lo que haya puesto otra aplicación en el mismo Redis. |
+| **Scheduler** | `schedule.hpp`: `every()`, `dailyAt("HH:MM")` y `hourlyAt(N)`. No ejecuta, **encola**, así que la tarea es un job con sus reintentos. Sin expresiones cron. `syrax schedule:work` y `schedule:list`. |
+| **`Idempotency-Key`** | `idempotency.hpp` + `app.idempotency()`: el reintento devuelve la respuesta guardada. La misma clave con otro cuerpo es un 422, dos simultáneas son un 409, y un 5xx suelta la clave. |
+| **Paginación estándar** | `Query<T>::paginate(page, per)` devuelve un `Page<T>` con `data`, `total`, `page`, `perPage`, `pages` y `hasMore`, y OpenAPI lo documenta sin que nadie lo escriba. |
+| **Serialización parcial** | `app.partial()`: `?fields=id,name` recorta la respuesta. En una página filtra dentro de `data` y deja el sobre entero. Un `fields` con sólo nombres inventados es un 400, no objetos vacíos. |
 
 Tres cosas que cambiaron de plan por el camino:
 
@@ -78,10 +82,6 @@ Tres cosas que cambiaron de plan por el camino:
 
 | Qué | Por qué | Coste |
 |---|---|---|
-| **Scheduler** | Era no-objetivo cuando no había colas. Ahora reusa `jobs::dispatch` y el delta es mínimo. Finito si se rechazan las expresiones cron y se ofrece `every(5min)` / `dailyAt("03:00")`. | Bajo |
-| **`Idempotency-Key`** | El reintento del cliente crea el pedido dos veces. Casi ningún framework lo trae y en una API que cobra es obligatorio. Finito: guardar la respuesta N horas. | Bajo |
-| **Paginación estándar** | `limit`/`offset` están, pero cada API reinventa el sobre `{data, total, page}`. Que `Query<T>::paginate(page, per)` lo devuelva y OpenAPI lo documente. | Bajo |
-| **Serialización parcial** (`?fields=id,nombre`) | El cliente móvil no quiere 30 campos. Con `glz::reflect` los nombres ya están en tiempo de compilación, así que filtrar es barato y no hace falta un lenguaje de query. | Medio |
 | **Validar tokens de terceros** (`auth::jwks(url)`) | La parte finita y útil de OAuth2/OIDC: verificar la firma de un token de Auth0, Keycloak o Cognito contra su JWKS, con caché de claves. *Ser* el proveedor no entra (ver abajo). | Medio |
 | **Scopes** | `requireScope(actor, "pedidos:escribir")` junto a `requireRole`. Veinte líneas, y es lo que esperan los tokens de terceros del punto anterior. | Bajo |
 | **Soft deletes y timestamps** | `deleted_at` filtrado por defecto, `created_at`/`updated_at` automáticos. La conveniencia que todo el mundo reimplementa mal. | Medio |

@@ -4,6 +4,11 @@
 #include <catch2/reporters/catch_reporter_event_listener.hpp>
 #include <catch2/reporters/catch_reporter_registrars.hpp>
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
 #include <atomic>
 #include <cstdint>
 #include <stdexcept>
@@ -31,6 +36,34 @@ std::atomic<int>& closes() {
 std::atomic<std::uint16_t>& boundPort() {
     static std::atomic<std::uint16_t> value{0};
     return value;
+}
+
+// Conecta y cuelga hasta que el servidor acepte de verdad. Varias seguidas
+// porque con SO_REUSEPORT una sola que funcione no prueba que esten todos.
+bool accepting() {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+
+    int seguidas = 0;
+    while (seguidas < 8 && std::chrono::steady_clock::now() < deadline) {
+        const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0) return false;
+
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port   = ::htons(boundPort());
+        ::inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+
+        const bool ok = ::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
+        ::close(fd);
+
+        if (ok) {
+            ++seguidas;
+            continue;
+        }
+        seguidas = 0;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return seguidas == 8;
 }
 
 // Sin esto, el proceso termina con el servidor todavia vivo y Drogon aborta
@@ -143,7 +176,13 @@ void ensureServer() {
         }
         REQUIRE(ready);
         REQUIRE(boundPort() != 0);
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        // El aviso de arranque no basta: en Linux, Drogon abre un listener por
+        // hilo de IO con SO_REUSEPORT y el kernel reparte las conexiones entre
+        // todos, asi que una que caiga en un socket que todavia no llamo a
+        // listen() se rechaza con ECONNREFUSED. Aqui habia un sleep de 100ms
+        // que lo tapaba: alcanzaba en un portatil y no en un CI cargado.
+        REQUIRE(accepting());
     });
 }
 

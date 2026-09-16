@@ -436,6 +436,7 @@ inline constexpr std::string_view kBootstrapCpp = R"T(#include "bootstrap/app.hp
 #include "bootstrap/errors.hpp"
 #include "bootstrap/middleware.hpp"
 #include "bootstrap/queue.hpp"
+#include "bootstrap/schedule.hpp"
 #include "routes/routes.hpp"
 
 #include <filesystem>
@@ -456,6 +457,7 @@ syrax::App create() {
     database();
     cache();
     queue();
+    schedule();
 
     syrax::App app;
 
@@ -971,7 +973,25 @@ void middleware(syrax::App& app) {
 
     app.useOnResponse(syrax::securityHeaders());
 
+    // El contador vive en este proceso: con varias instancias el limite real
+    // es el configurado por cada una. Para que valga de verdad, con Redis
+    // encendido, cambia esta linea por:
+    //
+    //   app.useAsync(syrax::rateLimitShared(cfg.rateLimit, std::chrono::seconds{60}));
     app.use(syrax::rateLimit(cfg.rateLimit, std::chrono::minutes{1}));
+
+    // ETag y 304 en los GET de exito: el cliente que ya tiene el recurso
+    // recibe una linea de cabeceras en vez del JSON entero.
+    app.etag();
+
+    // ?fields=id,name recorta la respuesta. El movil que pinta una lista no
+    // necesita los treinta campos del recurso.
+    app.partial();
+
+    // Reintentos seguros con Idempotency-Key. Necesita Redis; sin el, la
+    // peticion sigue como si la cabecera no estuviera.
+    //
+    //   app.idempotency();
 }
 
 }  // namespace bootstrap
@@ -1009,6 +1029,48 @@ void errors() {
 
         return std::nullopt;
     });
+}
+
+}  // namespace bootstrap
+)T";
+
+inline constexpr std::string_view kBootstrapScheduleH = R"T(#pragma once
+
+namespace bootstrap {
+
+void schedule();
+
+}  // namespace bootstrap
+)T";
+
+inline constexpr std::string_view kBootstrapScheduleCpp = R"T(#include "bootstrap/schedule.hpp"
+
+#include <syrax/syrax.hpp>
+
+#include <chrono>
+
+namespace bootstrap {
+
+// Las tareas periodicas. El scheduler no ejecuta nada: ENCOLA, y a partir de
+// ahi el job es un job como los demas, con sus reintentos y su registro de
+// fallos. Corre en su propio proceso:
+//
+//   syrax schedule:work     los encola cuando toca
+//   syrax schedule:list     dice que hay programado, sin levantar nada
+//
+// Hay tres formas de programar y no hay expresiones cron: escribir mal un
+// */15 9-17 * * 1-5 no da un error, da una tarea que corre cuando no toca.
+//
+//   syrax::schedule::every(std::chrono::minutes{5}).dispatch(PurgeSessions{});
+//   syrax::schedule::dailyAt("03:00").dispatch(NightlyReport{});
+//   syrax::schedule::hourlyAt(30).onQueue("informes").dispatch(Rollup{});
+//
+// Corre UNA sola instancia: dos schedulers encolan cada tarea dos veces.
+void schedule() {
+    // Descomenta cuando tengas la primera. El job va registrado en
+    // bootstrap/queue.cpp con jobs::handle<T>(), como los demas.
+    //
+    // syrax::schedule::dailyAt("03:00").dispatch(SendWelcome{});
 }
 
 }  // namespace bootstrap
@@ -1692,12 +1754,15 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    if (arg == "queue:work" || arg == "queue:failed" || arg == "queue:retry") {
+    if (arg == "queue:work" || arg == "queue:failed" || arg == "queue:retry" ||
+        arg == "schedule:work" || arg == "schedule:list") {
         try {
             auto app = bootstrap::create();
 
-            if (arg == "queue:failed") return syrax::jobs::listFailed();
-            if (arg == "queue:retry")  return syrax::jobs::retryAll();
+            if (arg == "queue:failed")   return syrax::jobs::listFailed();
+            if (arg == "queue:retry")    return syrax::jobs::retryAll();
+            if (arg == "schedule:work")  return syrax::schedule::work();
+            if (arg == "schedule:list")  return syrax::schedule::list();
             return syrax::jobs::work();
         } catch (const std::exception& e) {
             std::cerr << "\nerror: " << e.what() << "\n\n";
@@ -2172,6 +2237,8 @@ inline constexpr File kProjectFiles[] = {
     {"src/bootstrap/middleware.cpp",             kBootstrapMiddlewareCpp},
     {"src/bootstrap/cache.hpp",                  kBootstrapCacheH},
     {"src/bootstrap/cache.cpp",                  kBootstrapCacheCpp},
+    {"src/bootstrap/schedule.hpp",               kBootstrapScheduleH},
+    {"src/bootstrap/schedule.cpp",               kBootstrapScheduleCpp},
     {"src/bootstrap/queue.hpp",                  kBootstrapQueueH},
     {"src/bootstrap/queue.cpp",                  kBootstrapQueueCpp},
     {"src/jobs/SendWelcome.hpp",                 kJobSendWelcome},

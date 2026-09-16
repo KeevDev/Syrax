@@ -7,6 +7,7 @@
 #include <syrax/db.hpp>
 #include <syrax/env.hpp>
 #include <syrax/errors.hpp>
+#include <syrax/fields.hpp>
 #include <syrax/health.hpp>
 #include <syrax/jobs.hpp>
 #include <syrax/log.hpp>
@@ -16,5 +17,6 @@
 #include <syrax/query.hpp>
 #include <syrax/policy.hpp>
 #include <syrax/result.hpp>
+#include <syrax/schedule.hpp>
 #include <syrax/validation.hpp>
 #include <syrax/ws.hpp>

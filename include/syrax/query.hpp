@@ -131,6 +131,25 @@ std::string columnList(bool skipPrimaryKey = false) {
 
 // ---------------------------------------------------------------- Query
 
+// El sobre de una pagina. Cada API lo reinventa —unas con `meta`, otras con
+// `pagination`, otras con `_links`— y el cliente acaba escribiendo un adaptador
+// por servicio. Con uno solo, la forma la conoce el que consume y la documenta
+// OpenAPI sin que nadie la escriba a mano.
+//
+// Se queda en lo que hace falta para pintar un paginador: los datos, cuantos
+// hay en total, en que pagina estamos y cuantas hay. `pages` y `hasMore` salen
+// de los otros tres, pero calcularlos en el cliente es la clase de division
+// entera que alguien redondea mal.
+template <typename T>
+struct Page {
+    std::vector<T> data;
+    std::int64_t   total   = 0;
+    std::int64_t   page    = 1;
+    std::int64_t   perPage = 0;
+    std::int64_t   pages   = 0;
+    bool           hasMore = false;
+};
+
 // Construye SELECT / UPDATE / DELETE / COUNT sobre un struct plano.
 //
 //   auto adultos = co_await Query<User>()
@@ -247,6 +266,42 @@ public:
     }
 
     drogon::Task<bool> exists() const { co_return (co_await count()) > 0; }
+
+    // Una pagina con su total. Son DOS consultas —el count y el select— y no
+    // hay forma de hacerlo en una sin window functions, que sqlite y mysql
+    // viejos no tienen. Se dice aqui porque en una tabla grande el count(*) es
+    // el caro de los dos, y quien lo sepa puede decidir no pedirlo.
+    //
+    //   co_return co_await syrax::Query<models::User>()
+    //                 .orderBy(&models::User::id)
+    //                 .paginate(page, perPage);
+    //
+    // Sin orderBy el orden lo decide el motor y puede cambiar entre paginas:
+    // la fila que estaba en la 1 aparece otra vez en la 2. Va sin imponerlo
+    // porque la clave de orden es del que consulta, no del framework.
+    drogon::Task<Page<T>> paginate(std::int64_t page = 1, std::int64_t perPage = 15) const {
+        // Una pagina 0 o negativa es siempre un parametro mal leido, y devolver
+        // un offset negativo seria un error de SQL en vez de una respuesta.
+        if (page < 1) page = 1;
+        if (perPage < 1) perPage = 1;
+
+        Page<T> out{.page = page, .perPage = perPage};
+        out.total = co_await count();
+        out.pages = (out.total + perPage - 1) / perPage;
+
+        // Una pagina mas alla del final devuelve vacio, no un error: es lo que
+        // pasa cuando alguien borra filas mientras otro pagina.
+        if (out.total > 0 && (page - 1) * perPage < out.total) {
+            Query copy{*this};
+            copy.limit_  = static_cast<std::size_t>(perPage);
+            copy.offset_ = static_cast<std::size_t>((page - 1) * perPage);
+
+            out.data = co_await copy.get();
+        }
+
+        out.hasMore = page < out.pages;
+        co_return out;
+    }
 
     // Borra las filas que cumplen los filtros. Devuelve cuantas.
     drogon::Task<std::size_t> del() const {

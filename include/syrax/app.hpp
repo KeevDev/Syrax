@@ -11,8 +11,10 @@
 #include <syrax/result.hpp>
 #include <syrax/traits.hpp>
 
+#include <array>
 #include <charconv>
 #include <cstdint>
+#include <format>
 #include <optional>
 #include <iostream>
 #include <set>
@@ -285,25 +287,110 @@ void respond(const Callback& cb, const Result<T>& r, int okStatus) {
 
 }  // namespace detail
 
+class App;
+
+namespace detail {
+
+// Los alias viven aparte de las rutas porque su vida util es otra: se
+// consultan desde cualquier sitio, mucho despues de registrarlas.
+inline std::unordered_map<std::string, std::string>& routeAliases() {
+    static std::unordered_map<std::string, std::string> aliases;
+    return aliases;
+}
+
+}  // namespace detail
+
+// Lo que devuelve registrar una ruta. Su unico trabajo es dejarle un nombre
+// con el que construir la URL mas tarde, sin repetirla a mano.
+class Route {
+public:
+    explicit Route(std::string path) : path_{std::move(path)} {}
+
+    const Route& as(const std::string& alias) const {
+        detail::routeAliases()[alias] = path_;
+        return *this;
+    }
+
+    const std::string& path() const { return path_; }
+
+private:
+    std::string path_;
+};
+
+// La URL de una ruta con alias, con sus {param} rellenos en orden:
+//
+//   urlFor("users.show", 42)  ->  "/api/v1/users/42"
+//
+// Sirve para la cabecera Location de un 201, o para enlazar un recurso desde
+// otro sin escribir la ruta dos veces.
+template <typename... Args>
+std::string urlFor(const std::string& alias, const Args&... args) {
+    const auto found = detail::routeAliases().find(alias);
+    if (found == detail::routeAliases().end()) return {};
+
+    std::string url = found->second;
+
+    const std::array<std::string, sizeof...(Args)> valores{std::format("{}", args)...};
+    for (const auto& valor : valores) {
+        const auto abre = url.find('{');
+        if (abre == std::string::npos) break;
+
+        const auto cierra = url.find('}', abre);
+        if (cierra == std::string::npos) break;
+
+        url.replace(abre, cierra - abre + 1, valor);
+    }
+    return url;
+}
+
+// Un prefijo compartido. La base de la API se escribe una vez y los endpoints
+// se registran relativos a ella.
+class Group {
+public:
+    Group(App& app, std::string prefix) : app_{&app}, prefix_{std::move(prefix)} {}
+
+    template <typename F> Route get(const std::string& path, F&& f);
+    template <typename F> Route post(const std::string& path, F&& f);
+    template <typename F> Route put(const std::string& path, F&& f);
+    template <typename F> Route patch(const std::string& path, F&& f);
+    template <typename F> Route del(const std::string& path, F&& f);
+
+    Group group(const std::string& prefix) const { return Group{*app_, prefix_ + prefix}; }
+
+    const std::string& prefix() const { return prefix_; }
+
+private:
+    App*        app_;
+    std::string prefix_;
+};
+
 // La aplicacion. Envuelve drogon::app() y traduce entre handlers tipados y
 // el mundo de HttpRequestPtr / callbacks.
 class App {
 public:
-    template <typename F> App& get(const std::string& path, F&& f) {
-        return route<false>(path, std::forward<F>(f), drogon::Get, 200);
+    template <typename F> Route get(const std::string& path, F&& f) {
+        route<false>(path, std::forward<F>(f), drogon::Get, 200);
+        return Route{path};
     }
-    template <typename F> App& post(const std::string& path, F&& f) {
-        return route<true>(path, std::forward<F>(f), drogon::Post, 201);
+    template <typename F> Route post(const std::string& path, F&& f) {
+        route<true>(path, std::forward<F>(f), drogon::Post, 201);
+        return Route{path};
     }
-    template <typename F> App& put(const std::string& path, F&& f) {
-        return route<true>(path, std::forward<F>(f), drogon::Put, 200);
+    template <typename F> Route put(const std::string& path, F&& f) {
+        route<true>(path, std::forward<F>(f), drogon::Put, 200);
+        return Route{path};
     }
-    template <typename F> App& patch(const std::string& path, F&& f) {
-        return route<true>(path, std::forward<F>(f), drogon::Patch, 200);
+    template <typename F> Route patch(const std::string& path, F&& f) {
+        route<true>(path, std::forward<F>(f), drogon::Patch, 200);
+        return Route{path};
     }
-    template <typename F> App& del(const std::string& path, F&& f) {
-        return route<false>(path, std::forward<F>(f), drogon::Delete, 200);
+    template <typename F> Route del(const std::string& path, F&& f) {
+        route<false>(path, std::forward<F>(f), drogon::Delete, 200);
+        return Route{path};
     }
+
+    // Registra bajo un prefijo comun: app.group("/api/v1").
+    Group group(const std::string& prefix) { return Group{*this, prefix}; }
 
     // Middleware global: corre antes de cada handler, en orden de registro.
     App& use(Middleware middleware) {
@@ -759,5 +846,22 @@ private:
         }
     }
 };
+
+// Group solo puede reenviar a App una vez App esta completa.
+template <typename F> Route Group::get(const std::string& path, F&& f) {
+    return app_->get(prefix_ + path, std::forward<F>(f));
+}
+template <typename F> Route Group::post(const std::string& path, F&& f) {
+    return app_->post(prefix_ + path, std::forward<F>(f));
+}
+template <typename F> Route Group::put(const std::string& path, F&& f) {
+    return app_->put(prefix_ + path, std::forward<F>(f));
+}
+template <typename F> Route Group::patch(const std::string& path, F&& f) {
+    return app_->patch(prefix_ + path, std::forward<F>(f));
+}
+template <typename F> Route Group::del(const std::string& path, F&& f) {
+    return app_->del(prefix_ + path, std::forward<F>(f));
+}
 
 }  // namespace syrax

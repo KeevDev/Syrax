@@ -223,3 +223,55 @@ TEST_CASE("App documenta el path param con el tipo que pide el handler", "[opena
     CHECK(doc["paths"]["/posts/{slug}"]["get"]["parameters"][0]["schema"]["type"].asString() ==
           "string");
 }
+
+TEST_CASE("un grupo prefija las rutas que registra", "[app]") {
+    syrax::App app;
+    app.quiet();
+
+    auto api = app.group("/api/v1");
+    api.get("/users", []() -> syrax::Task<syrax::Result<Recurso>> {
+        co_return Recurso{.id = 1};
+    });
+    api.get("/users/{id}", [](std::int64_t id) -> syrax::Task<syrax::Result<Recurso>> {
+        co_return Recurso{.id = id};
+    });
+
+    const auto doc = parse(app.openApi());
+
+    CHECK(doc["paths"].isMember("/api/v1/users"));
+    CHECK(doc["paths"].isMember("/api/v1/users/{id}"));
+    CHECK_FALSE(doc["paths"].isMember("/users"));
+}
+
+TEST_CASE("los grupos se anidan", "[app]") {
+    syrax::App app;
+    app.quiet();
+
+    auto admin = app.group("/api/v1").group("/admin");
+    admin.get("/stats", []() -> syrax::Task<syrax::Result<Recurso>> {
+        co_return Recurso{.id = 1};
+    });
+
+    CHECK(parse(app.openApi())["paths"].isMember("/api/v1/admin/stats"));
+}
+
+TEST_CASE("un alias construye la URL sin repetir la ruta", "[app]") {
+    syrax::App app;
+    app.quiet();
+
+    auto api = app.group("/api/v1");
+    api.get("/posts", []() -> syrax::Task<syrax::Result<Recurso>> {
+        co_return Recurso{.id = 1};
+    }).as("posts.index");
+    api.get("/posts/{id}/comentarios/{cid}",
+            [](std::int64_t id, std::int64_t cid) -> syrax::Task<syrax::Result<Recurso>> {
+                co_return Recurso{.id = id + cid};
+            })
+        .as("posts.comentarios");
+
+    CHECK(syrax::urlFor("posts.index") == "/api/v1/posts");
+    CHECK(syrax::urlFor("posts.comentarios", 7, 42) == "/api/v1/posts/7/comentarios/42");
+
+    // Un alias que nadie registro no inventa una URL que no existe.
+    CHECK(syrax::urlFor("no.existe", 1).empty());
+}

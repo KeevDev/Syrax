@@ -29,6 +29,10 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Nadie usa modulos de C++20 aqui, y el escaneo que CMake activa por defecto
+# ademas dispara un assert de ninja 1.13 al cambiar la estructura del build.
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
+
 # ccache acelera muchisimo las recompilaciones de las dependencias: Drogon
 # son ~200 objetos y sin cache se rehacen enteros ante cualquier cambio de
 # configuracion.
@@ -101,9 +105,6 @@ include(Catch)
 catch_discover_tests(@NAME@_tests)
 )T";
 
-// Un test de verdad, no un assert(true): ejercita el mapeo a resource y las
-// reglas del request, que son las dos cosas que se rompen al cambiar un
-// modelo. Lo que necesita base de datos va aparte, y por eso no esta aqui.
 inline constexpr std::string_view kTestUser = R"T(#include <catch2/catch_test_macros.hpp>
 
 #include "factories/UserFactory.hpp"
@@ -116,10 +117,6 @@ TEST_CASE("el resource expone solo lo que la API promete") {
 
     CHECK(resource.id == user.id);
     CHECK(resource.name == user.name);
-
-    // La edad no sale al JSON: si alguien la agrega al resource sin querer,
-    // este test no se entera, pero el de abajo si te dice que cambiaste las
-    // reglas. Para lo que no debe salir, mira el snapshot del /openapi.json.
 }
 
 TEST_CASE("las reglas del request atrapan lo que el tipo no puede") {
@@ -135,12 +132,8 @@ TEST_CASE("las reglas del request atrapan lo que el tipo no puede") {
 
 TEST_CASE("validate devuelve todos los fallos, no el primero") {
     requests::CreateUser malo{.name = "", .email = "tampoco", .age = 999};
-    const auto           fallos = syrax::validate(malo);
-
-    // Cuatro y no tres: un nombre vacio rompe notEmpty Y minLen(2). Cada
-    // regla que falla es un error, que es lo que hace que el 422 los liste
-    // todos y el cliente no tenga que ir descubriendolos de uno en uno.
-    CHECK(fallos.size() == 4);
+    // Cuatro y no tres: un nombre vacio rompe notEmpty Y minLen(2).
+    CHECK(syrax::validate(malo).size() == 4);
 }
 )T";
 
@@ -281,8 +274,6 @@ inline constexpr std::string_view kPublicIndex = R"T(<!DOCTYPE html>
 <style>
 :root {
   color-scheme: light dark;
-  /* Los colores con los que GCC imprime un diagnostico: el error en rojo,
-     el caret en verde, la nota en cian. La paleta sale del compilador. */
   --papel:  #f3f4f7;  --panel:  #ffffff;  --linea: #dfe1e8;
   --tinta:  #14161c;  --gris:   #666c7a;
   --error:  #c62828;  --caret:  #2e7d32;  --nota:  #0f6f86;
@@ -705,13 +696,9 @@ inline constexpr std::string_view kRoutesV1H = R"T(#pragma once
 
 #include <syrax/syrax.hpp>
 
-#include <string_view>
-
 namespace routes::v1 {
 
-inline constexpr std::string_view kPrefix = "/api/v1";
-
-void register_(syrax::App& app);
+void register_(syrax::Group api);
 
 }  // namespace routes::v1
 )T";
@@ -720,23 +707,17 @@ inline constexpr std::string_view kRoutesV1Cpp = R"T(#include "routes/v1.hpp"
 
 #include "http/controllers/User/UserController.hpp"
 
-#include <string>
-
 namespace routes::v1 {
 
 namespace user = controllers::UserController;
 
-// El mapa de la API: una linea por endpoint, y a la derecha quien lo atiende.
-// Se lee de un vistazo que expone esta version, sin abrir ningun controlador.
-void register_(syrax::App& app) {
-    const std::string base{kPrefix};
+void register_(syrax::Group api) {
+    api.get("/users", user::index).as("users.index");
+    api.post("/users", user::store).as("users.store");
 
-    app.get(base + "/users", user::index);
-    app.post(base + "/users", user::store);
-
-    app.get(base + "/users/{id}", user::show);
-    app.put(base + "/users/{id}", user::update);
-    app.del(base + "/users/{id}", user::destroy);
+    api.get("/users/{id}", user::show).as("users.show");
+    api.put("/users/{id}", user::update).as("users.update");
+    api.del("/users/{id}", user::destroy).as("users.destroy");
 }
 
 }  // namespace routes::v1
@@ -746,8 +727,7 @@ inline constexpr std::string_view kRoutesCpp = R"T(#include "routes/routes.hpp"
 
 #include "routes/v1.hpp"
 
-// Con nombre, no anonimo: Glaze refleja este struct para serializarlo, y un
-// tipo sin enlace no se puede reflejar bajo clang.
+// Con nombre, no anonimo: Glaze no refleja un tipo sin enlace.
 namespace health {
 
 struct Status {
@@ -761,8 +741,7 @@ void registerRoutes(syrax::App& app) {
         return health::Status{.status = "ok"};
     });
 
-    routes::v1::register_(app);
-
+    routes::v1::register_(app.group("/api/v1"));
 }
 )T";
 
@@ -913,8 +892,6 @@ using syrax::db::execute;
 using syrax::db::findOne;
 using syrax::db::returning;
 
-// Con el query builder: las columnas se verifican en compilacion, asi que
-// &models::User::nombre_mal no compila en vez de fallar en produccion.
 syrax::Task<std::vector<models::User>> all() {
     co_return co_await syrax::Query<models::User>().orderBy(&models::User::id).get();
 }
@@ -923,8 +900,6 @@ syrax::Task<std::optional<models::User>> find(std::int64_t id) {
     co_return co_await syrax::Query<models::User>().where(&models::User::id, "=", id).first();
 }
 
-// Con SQL a mano: sigue disponible, y es lo que usarias para un JOIN o
-// cualquier cosa que el builder no cubre.
 syrax::Task<bool> emailTaken(std::string email) {
     const auto found = co_await findOne<models::User>(
         "SELECT id, name, email, age FROM users WHERE email = @P1@", std::move(email));
@@ -948,8 +923,6 @@ syrax::Task<std::optional<models::User>> createIfEmailFree(std::string name,
                                     .exists();
             if (tomado) co_return std::nullopt;
 
-            // La clave primaria a cero es lo que le dice a save() que esto
-            // es un alta y no una actualizacion.
             models::User nuevo{.id = 0, .name = name, .email = email, .age = age};
             co_await syrax::save(nuevo, tx.client());
             co_return nuevo;
@@ -1048,11 +1021,6 @@ inline constexpr std::string_view kControllerUserH = R"T(#pragma once
 
 namespace controllers::UserController {
 
-// Un handler por accion, con la firma que declara lo que necesita: Syrax
-// deduce de ahi el path param, el body a parsear y el esquema que documenta.
-//
-// Que ruta lleva a cada uno esta en routes/v1.cpp. Aqui esta el que hacer,
-// no el donde: cambiar la URL o la version de la API no toca este archivo.
 syrax::Task<syrax::Result<std::vector<resources::UserResource>>> index();
 
 syrax::Task<syrax::Result<resources::UserResource>> show(std::int64_t id);
@@ -1076,10 +1044,6 @@ using namespace syrax;
 namespace controllers::UserController {
 
 namespace service = services::UserService;
-
-// El controlador traduce entre HTTP y el dominio, y nada mas: entra un id o
-// un body ya validado, sale un resource o un Error. La regla de negocio esta
-// en el service; el SQL, mas abajo.
 
 Task<Result<std::vector<resources::UserResource>>> index() {
     co_return resources::from(co_await service::list());

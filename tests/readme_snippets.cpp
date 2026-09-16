@@ -124,6 +124,12 @@ int main() {
         co_return PostResource{.id = id, .title = body.title};
     });
 
+    auto api = app.group("/api/v1");
+    api.get("/users/{id}", [](std::int64_t id) -> Task<Result<PostResource>> {
+        co_return PostResource{.id = id, .title = "x"};
+    }).as("users.show");
+    (void)urlFor("users.show", 42);
+
     Room sala;
     app.ws("/chat", {
         .onOpen    = [&](const Socket& s) { sala.join(s); },

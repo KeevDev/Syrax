@@ -513,7 +513,7 @@ src/
 ├── bootstrap/            preparacion de la app
 ├── routes/               el mapa de la API, versionable
 │   ├── routes.cpp        /health y el alta de cada version
-│   └── v1.cpp            una linea por endpoint: ruta -> metodo del controlador
+│   └── v1.cpp            una linea por endpoint: ruta -> metodo del controlador, sin repetir el prefijo
 ├── http/                 TODO lo atado al transporte
 │   ├── controllers/User/
 │   ├── requests/User/
@@ -530,7 +530,16 @@ tests/
 **Por qué la ruta no vive en el controlador:** `routes/v1.cpp` se lee de un vistazo y dice qué expone esta versión de la API; el controlador dice qué hace cada acción. Un handler es una función normal, así que la ruta lo nombra y ya:
 
 ```cpp
-app.get(base + "/users/{id}", user::show);   // routes/v1.cpp
+// routes/routes.cpp — la base se escribe una vez
+routes::v1::register_(app.group("/api/v1"));
+```
+
+```cpp
+// routes/v1.cpp — relativo a esa base
+void register_(syrax::Group api) {
+    api.get("/users", user::index).as("users.index");
+    api.get("/users/{id}", user::show).as("users.show");
+}
 ```
 
 ```cpp
@@ -543,6 +552,14 @@ Task<Result<UserResource>> show(std::int64_t id) {   // el controlador
 ```
 
 Syrax deduce de esa firma el path param, el body a parsear y el esquema que documenta, igual que con una lambda. Cambiar la URL o versionar la API no toca el controlador.
+
+**Grupos y alias.** `group()` anida (`app.group("/api/v1").group("/admin")`), y `as()` le pone nombre a una ruta para no volver a escribirla:
+
+```cpp
+urlFor("users.show", 42)   // "/api/v1/users/42"
+```
+
+Sirve para la cabecera `Location` de un 201, o para enlazar un recurso desde otro. Un alias que nadie registró devuelve vacío, no una URL inventada.
 
 **Por qué existe `http/`:** marca un límite real. Si mañana expones la misma lógica por gRPC, esa carpeta se tira entera y `services/`, `repositories/` y `models/` siguen sirviendo sin tocarse.
 

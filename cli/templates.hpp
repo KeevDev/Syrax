@@ -286,7 +286,7 @@ inline constexpr std::string_view kPublicIndex = R"T(<!DOCTYPE html>
 * { box-sizing: border-box; }
 html, body { height: 100%; }
 body {
-  margin: 0; color: var(--hueso);
+  margin: 0; color: var(--hueso); min-height: 100dvh; display: flex;
   background:
     radial-gradient(1200px 600px at 70% -10%, #16325c 0%, transparent 60%),
     radial-gradient(800px 500px at 15% 10%, #0d2148 0%, transparent 55%),
@@ -309,14 +309,44 @@ body {
     radial-gradient(1px 1px at 24% 84%, #cfe0ff, transparent);
 }
 
-.hoja { max-width: 900px; margin: 0 auto; padding: 40px 24px 72px; position: relative; }
+.hoja {
+  width: 100%; max-width: 900px; margin: auto; position: relative;
+  padding: clamp(14px, 2.4vh, 34px) 24px clamp(18px, 3vh, 40px);
+}
 
 /* ---------- el dragon ---------- */
-.escena { position: relative; width: min(820px, 100%); margin: 0 auto -54px; }
+.escena { position: relative; width: min(720px, 64vh, 94%); margin: 0 auto clamp(-46px, -5vh, -22px); }
 .resplandor {
   position: absolute; inset: 10% 12% 20% 12%; border-radius: 50%;
-  background: radial-gradient(closest-side, rgba(240,180,41,.38), rgba(240,180,41,0) 72%);
+  background: radial-gradient(closest-side, rgba(240,180,41,.34), rgba(240,180,41,0) 72%);
   filter: blur(30px); animation: respira 6.5s ease-in-out infinite;
+}
+.nubes {
+  position: absolute; inset: -16% -14% -20%; pointer-events: none;
+  filter: url(#niebla);
+  -webkit-mask-image: radial-gradient(ellipse 78% 76% at 50% 50%, #000 46%, rgba(0,0,0,0) 86%);
+  mask-image: radial-gradient(ellipse 78% 76% at 50% 50%, #000 46%, rgba(0,0,0,0) 86%);
+  background:
+    radial-gradient(40% 34% at 8% 42%, rgba(240,180,41,.68), transparent 74%),
+    radial-gradient(36% 30% at 92% 36%, rgba(255,199,86,.62), transparent 76%),
+    radial-gradient(52% 30% at 52% 90%, rgba(214,146,26,.60), transparent 78%);
+  animation: deriva 22s ease-in-out infinite alternate;
+}
+.nubes-altas {
+  filter: url(#niebla-baja); opacity: .85;
+  background:
+    radial-gradient(26% 22% at 26% 14%, rgba(255,214,120,.38), transparent 74%),
+    radial-gradient(24% 20% at 74% 78%, rgba(240,180,41,.34), transparent 74%),
+    radial-gradient(20% 18% at 4% 76%, rgba(255,190,70,.30), transparent 72%);
+  animation: deriva-lenta 30s ease-in-out infinite alternate;
+}
+@keyframes deriva {
+  from { transform: translate3d(-12px, 6px, 0) scale(1); }
+  to   { transform: translate3d(14px, -8px, 0) scale(1.06); }
+}
+@keyframes deriva-lenta {
+  from { transform: translate3d(10px, -4px, 0) scale(1.04); }
+  to   { transform: translate3d(-12px, 8px, 0) scale(1); }
 }
 .syrax {
   position: relative; display: block; width: 100%; height: auto;
@@ -330,12 +360,12 @@ body {
 /* ---------- cabecera ---------- */
 .marca {
   text-align: center; margin: 0; position: relative;
-  font: 400 76px/1 Georgia, "Times New Roman", serif;
+  font: 400 clamp(38px, 7.2vh, 72px)/1 Georgia, "Times New Roman", serif;
   letter-spacing: .22em; text-indent: .22em; text-transform: uppercase;
   color: var(--oro);
   text-shadow: 0 0 28px rgba(240, 180, 41, .35);
 }
-.lema { text-align: center; color: var(--acero); margin: 14px 0 6px; }
+.lema { text-align: center; color: var(--acero); margin: clamp(6px, 1.4vh, 14px) 0 5px; font-size: clamp(13px, 1.9vh, 15px); }
 .proyecto {
   text-align: center; font: 12px/1 var(--mono); color: var(--oro-claro);
   letter-spacing: .1em; opacity: .85;
@@ -344,10 +374,10 @@ body {
 /* ---------- tarjetones ---------- */
 .tarjetones {
   display: grid; gap: 18px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  margin: 54px 0 34px;
+  margin: clamp(20px, 3.4vh, 50px) 0 clamp(14px, 2.4vh, 32px);
 }
 .tarjeton {
-  position: relative; display: block; padding: 30px 28px 26px;
+  position: relative; display: block; padding: clamp(16px, 2.4vh, 28px) 26px;
   text-decoration: none; color: inherit; border-radius: 14px;
   background: linear-gradient(180deg, rgba(27, 58, 107, .55), rgba(9, 20, 43, .75));
   border: 1px solid rgba(127, 168, 217, .25);
@@ -361,10 +391,11 @@ body {
 }
 .tarjeton .sello { font: 12px/1 var(--mono); color: var(--oro); letter-spacing: .14em; }
 .tarjeton h2 {
-  margin: 14px 0 8px; font: 400 27px/1.15 Georgia, "Times New Roman", serif; color: var(--hueso);
+  margin: clamp(8px, 1.4vh, 14px) 0 6px; font: 400 clamp(20px, 3vh, 26px)/1.15 Georgia, "Times New Roman", serif;
+  color: var(--hueso);
 }
 .tarjeton p { margin: 0; color: var(--acero); font-size: 14px; }
-.tarjeton .flecha { margin-top: 18px; color: var(--oro); font: 13px/1 var(--mono); }
+.tarjeton .flecha { margin-top: clamp(10px, 1.8vh, 18px); color: var(--oro); font: 13px/1 var(--mono); }
 
 /* ---------- enlaces menores ---------- */
 .menores { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
@@ -375,20 +406,45 @@ body {
 }
 .menor:hover { color: var(--oro); border-color: rgba(240, 180, 41, .5); }
 
-footer { margin-top: 44px; text-align: center; color: #56719c; font-size: 12px; }
+footer { margin-top: clamp(16px, 2.6vh, 38px); text-align: center; color: #56719c; font-size: 12px; }
 footer code { color: var(--acero); }
 
 @media (prefers-reduced-motion: reduce) {
-  .syrax, .resplandor { animation: none; }
-}
-</style>
+  .syrax, .resplandor, .nubes, </style>
 </head>
 <body>
+<svg width="0" height="0" aria-hidden="true" focusable="false">
+  <filter id="niebla" color-interpolation-filters="sRGB" x="-20%" y="-20%" width="140%" height="140%">
+    <feTurbulence type="fractalNoise" baseFrequency="0.009 0.022" numOctaves="5" seed="11"
+                  result="ruido"/>
+    <feColorMatrix in="ruido" type="matrix" result="oro"
+                   values="0 0 0 0 0.98
+                           0 0 0 0 0.76
+                           0 0 0 0 0.22
+                           0 0 0 -2.2 1.15"/>
+    <feGaussianBlur in="oro" stdDeviation="3" result="suave"/>
+    <feComposite in="suave" in2="SourceGraphic" operator="in"/>
+  </filter>
+  <filter id="niebla-baja" color-interpolation-filters="sRGB" x="-20%" y="-20%" width="140%" height="140%">
+    <feTurbulence type="fractalNoise" baseFrequency="0.006 0.014" numOctaves="3" seed="4"
+                  result="ruido"/>
+    <feColorMatrix in="ruido" type="matrix" result="oro"
+                   values="0 0 0 0 1
+                           0 0 0 0 0.83
+                           0 0 0 0 0.35
+                           0 0 0 -2.4 1.25"/>
+    <feGaussianBlur in="oro" stdDeviation="6" result="suave"/>
+    <feComposite in="suave" in2="SourceGraphic" operator="in"/>
+  </filter>
+</svg>
+
 <div class="estrellas"></div>
 
 <div class="hoja">
 
   <div class="escena">
+    <div class="nubes"></div>
+    <div class="nubes nubes-altas"></div>
     <div class="resplandor"></div>
     <img class="syrax" src="/dragon.jpg" width="1000" height="667" fetchpriority="high"
          alt="Syrax, el dragon dorado, con las alas abiertas sobre una roca">

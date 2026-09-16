@@ -298,7 +298,7 @@ body {
 
 /* ---------- estrellas ---------- */
 .estrellas {
-  position: fixed; inset: 0; pointer-events: none; opacity: .5;
+  position: fixed; inset: 0; z-index: 0; pointer-events: none; opacity: .5;
   background-image:
     radial-gradient(1px 1px at 12% 22%, #fff, transparent),
     radial-gradient(1px 1px at 78% 14%, #cfe0ff, transparent),
@@ -310,6 +310,7 @@ body {
 }
 
 .hoja {
+  position: relative; z-index: 1;
   width: 100%; max-width: 900px; margin: auto; position: relative;
   padding: clamp(14px, 2.4vh, 34px) 24px clamp(18px, 3vh, 40px);
 }
@@ -322,23 +323,23 @@ body {
   filter: blur(30px); animation: respira 6.5s ease-in-out infinite;
 }
 .nubes {
-  position: absolute; inset: -16% -14% -20%; pointer-events: none;
+  position: fixed; inset: -10vh -10vw; z-index: 0; pointer-events: none;
   filter: url(#niebla);
-  -webkit-mask-image: radial-gradient(ellipse 78% 76% at 50% 50%, #000 46%, rgba(0,0,0,0) 86%);
-  mask-image: radial-gradient(ellipse 78% 76% at 50% 50%, #000 46%, rgba(0,0,0,0) 86%);
   background:
-    radial-gradient(40% 34% at 8% 42%, rgba(240,180,41,.68), transparent 74%),
-    radial-gradient(36% 30% at 92% 36%, rgba(255,199,86,.62), transparent 76%),
-    radial-gradient(52% 30% at 52% 90%, rgba(214,146,26,.60), transparent 78%);
-  animation: deriva 22s ease-in-out infinite alternate;
+    radial-gradient(26% 24% at 26% 24%, rgba(240,180,41,.62), transparent 70%),
+    radial-gradient(24% 22% at 74% 20%, rgba(255,199,86,.56), transparent 72%),
+    radial-gradient(34% 20% at 50% 46%, rgba(214,146,26,.54), transparent 74%),
+    radial-gradient(20% 26% at 8% 52%, rgba(240,180,41,.40), transparent 72%),
+    radial-gradient(20% 26% at 93% 56%, rgba(255,190,70,.38), transparent 72%);
+  animation: deriva 26s ease-in-out infinite alternate;
 }
 .nubes-altas {
-  filter: url(#niebla-baja); opacity: .85;
+  filter: url(#niebla-baja); opacity: .8;
   background:
-    radial-gradient(26% 22% at 26% 14%, rgba(255,214,120,.38), transparent 74%),
-    radial-gradient(24% 20% at 74% 78%, rgba(240,180,41,.34), transparent 74%),
-    radial-gradient(20% 18% at 4% 76%, rgba(255,190,70,.30), transparent 72%);
-  animation: deriva-lenta 30s ease-in-out infinite alternate;
+    radial-gradient(22% 20% at 14% 12%, rgba(255,214,120,.44), transparent 72%),
+    radial-gradient(20% 18% at 86% 74%, rgba(240,180,41,.40), transparent 72%),
+    radial-gradient(28% 16% at 44% 84%, rgba(255,190,70,.34), transparent 74%);
+  animation: deriva-lenta 34s ease-in-out infinite alternate;
 }
 @keyframes deriva {
   from { transform: translate3d(-12px, 6px, 0) scale(1); }
@@ -438,13 +439,13 @@ footer code { color: var(--acero); }
   </filter>
 </svg>
 
+<div class="nubes"></div>
+<div class="nubes nubes-altas"></div>
 <div class="estrellas"></div>
 
 <div class="hoja">
 
   <div class="escena">
-    <div class="nubes"></div>
-    <div class="nubes nubes-altas"></div>
     <div class="resplandor"></div>
     <img class="syrax" src="/dragon.jpg" width="1000" height="667" fetchpriority="high"
          alt="Syrax, el dragon dorado, con las alas abiertas sobre una roca">

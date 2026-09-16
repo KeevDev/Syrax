@@ -1,5 +1,5 @@
 # Syrax
-![Uploading Gemini_Generated_Image_txdqnotxdqnotxdq.jpeg…]()
+![Uploading image.png…]()
 
 **Un framework de APIs para C++ moderno.** Construido sobre [Drogon](https://github.com/drogonframework/drogon) (HTTP) y [Glaze](https://github.com/stephenberry/glaze) (tipos y JSON).
 

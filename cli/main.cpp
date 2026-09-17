@@ -1093,7 +1093,24 @@ std::string nextMigrationNumber() {
     return buffer;
 }
 
-int cmdMake(const std::string& kind, const std::string& rawName) {
+// De donde sale el tenant es una decision del PROYECTO: de un claim del token,
+// de un subdominio, de una cabecera. El generador no puede adivinarla, asi que
+// deja la funcion escrita y marcada, en el sitio donde hay que decidirla.
+inline constexpr std::string_view kTenantHelper = R"(
+// De donde sale el tenant de esta peticion.
+//
+// CAMBIA ESTO. Lo normal es un claim del token -y entonces sale de
+// actorFrom(request)-, pero tambien puede venir del subdominio o de una
+// cabecera. Sea cual sea, es UNA linea y esta aqui, en un solo sitio.
+//
+// Si devuelve vacio, la consulta no encontrara nada: eso es preferible a que
+// encuentre lo de otro.
+std::string tenantOf(const Request& request) {
+    return actorFrom(request).id;
+}
+)";
+
+int cmdMake(const std::string& kind, const std::string& rawName, bool tenant = false) {
     if (!inProject()) return 1;
 
     if (rawName.empty()) {
@@ -1107,8 +1124,32 @@ int cmdMake(const std::string& kind, const std::string& rawName) {
     const std::string lower = lowerFirst(entity);
     const std::string table = tableOf(entity);
 
+    // Con --tenant, el tenant se enhebra por TODAS las firmas hasta la consulta.
+    // Es verboso y es a proposito: el framework no deja ejecutar una consulta
+    // sin el, asi que o viaja por la firma o no compila. Un parametro que se
+    // ve en cada capa es mejor que un contexto implicito que con corrutinas no
+    // se puede tener.
     const std::vector<std::pair<std::string_view, std::string>> subs = {
         {"@E@", entity}, {"@e@", lower}, {"@es@", table}, {"@slug@", slugOf(entity)},
+
+        {"@TFIELD@", tenant ? "    std::string  tenant_id;\n" : ""},
+        {"@TMARK@",  tenant ? "\n    static constexpr auto tenant = true;" : ""},
+        {"@TMIG@",   tenant ? "\n            table.tenantId();" : ""},
+
+        {"@TP@",     tenant ? "std::string tenant" : ""},
+        {"@TPC@",    tenant ? "std::string tenant, " : ""},
+        {"@TA@",     tenant ? "tenant" : ""},
+        {"@TAC@",    tenant ? "tenant, " : ""},
+        {"@TFOR@",   tenant ? ".forTenant(tenant)" : ""},
+        {"@TSET@",   tenant ? "\n    " + lower + ".tenant_id = std::move(tenant);" : ""},
+
+        // Calificado: la cabecera del controller no lleva `using namespace
+        // syrax`, y el token es el mismo en los dos archivos.
+        {"@CP@",     tenant ? "const syrax::Request& request" : ""},
+        {"@CPC@",    tenant ? "const syrax::Request& request, " : ""},
+        {"@CA@",     tenant ? "tenantOf(request)" : ""},
+        {"@CAC@",    tenant ? "tenantOf(request), " : ""},
+        {"@CHELP@",  tenant ? std::string{kTenantHelper} : ""},
     };
 
     bool any = false;
@@ -1164,6 +1205,7 @@ int cmdMake(const std::string& kind, const std::string& rawName) {
 
         const std::vector<std::pair<std::string_view, std::string>> migSubs = {
             {"@E@", klass}, {"@es@", table}, {"@FILE@", file},
+            {"@TMIG@", tenant ? "\n            table.tenantId();" : ""},
         };
 
         ok = emit("database/migrations/" + file + ".hpp", fill(tpl::kGenMigration, migSubs), any);
@@ -1298,7 +1340,7 @@ int usage() {
         "  serve [--port N] [--no-watch]         s    levanta y recompila al guardar; q sale\n"
         "  routes                                r    lista las rutas registradas\n"
         "\n"
-        "  make:api <Nombre>                     m:a  las seis capas de un recurso\n"
+        "  make:api <Nombre> [--tenant]          m:a  las seis capas de un recurso\n"
         "  make:controller|service|repository <Nombre>  una sola capa\n"
         "  make:resource|request|entity <Nombre>        una sola capa\n"
         "  make:job <Nombre>                     m:j  un job, ya registrado\n"
@@ -1413,8 +1455,17 @@ int main(int argc, char** argv) {
     for (const auto& kind : {"api", "controller", "service", "repository",
                              "resource", "request", "entity", "job", "migration"}) {
         if (cmd == std::string{"make:"} + kind) {
-            return cmdMake(kind == std::string{"entity"} ? "model" : kind,
-                           argc > 2 ? argv[2] : "");
+            // --tenant enhebra el tenant por todas las capas que se generen.
+            bool        tenant = false;
+            std::string nombre;
+
+            for (int i = 2; i < argc; ++i) {
+                const std::string arg = argv[i];
+                if (arg == "--tenant" || arg == "-t") tenant = true;
+                else if (nombre.empty())              nombre = arg;
+            }
+
+            return cmdMake(kind == std::string{"entity"} ? "model" : kind, nombre, tenant);
         }
     }
 

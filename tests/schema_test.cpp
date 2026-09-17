@@ -3,6 +3,7 @@
 
 #include <syrax/migration.hpp>
 
+#include <algorithm>
 #include <stdexcept>
 
 using Catch::Matchers::ContainsSubstring;
@@ -361,4 +362,29 @@ TEST_CASE("sqlite sigue sin poder alterar columnas") {
     CHECK_THROWS_AS(
         schema.table("users", [](Blueprint& t) { t.string("email").change(); }),
         std::logic_error);
+}
+
+TEST_CASE("tenantId crea la columna indexada y no nullable", "[schema][tenant]") {
+    syrax::Schema schema{syrax::Dialect::Postgres};
+
+    schema.create("facturas", [](syrax::Blueprint& table) {
+        table.id();
+        table.tenantId();
+    });
+
+    const auto sql = schema.statements();
+
+    // La columna, con su tipo de texto.
+    CHECK_THAT(sql.front(), ContainsSubstring("\"tenant_id\""));
+
+    // Y el indice, que es la mitad del punto: toda consulta del modelo la
+    // filtra, asi que sin indice cada lectura es un scan completo.
+    const bool hayIndice = std::ranges::any_of(sql, [](const std::string& linea) {
+        return linea.find("CREATE INDEX") != std::string::npos &&
+               linea.find("tenant_id") != std::string::npos;
+    });
+    CHECK(hayIndice);
+
+    // No nullable: una fila sin tenant no es de nadie y no la ve nadie.
+    CHECK_THAT(sql.front(), !ContainsSubstring("\"tenant_id\" VARCHAR(255) NULL"));
 }

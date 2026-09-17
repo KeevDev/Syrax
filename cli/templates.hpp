@@ -638,8 +638,8 @@ namespace models {
 struct @E@ {
     std::int64_t id = 0;
     std::string  name;
-
-    static constexpr auto table = "@es@";
+@TFIELD@
+    static constexpr auto table = "@es@";@TMARK@
 };
 
 }  // namespace models
@@ -730,11 +730,11 @@ inline constexpr std::string_view kGenRepositoryH = R"T(#pragma once
 namespace repositories {
 
 namespace @E@Repository {
-syrax::Task<std::vector<models::@E@>>   all();
-syrax::Task<std::optional<models::@E@>> find(std::int64_t id);
-syrax::Task<models::@E@>                create(std::string name);
-syrax::Task<std::optional<models::@E@>> update(std::int64_t id, std::string name);
-syrax::Task<bool>                       remove(std::int64_t id);
+syrax::Task<std::vector<models::@E@>>   all(@TP@);
+syrax::Task<std::optional<models::@E@>> find(@TPC@std::int64_t id);
+syrax::Task<models::@E@>                create(@TPC@std::string name);
+syrax::Task<std::optional<models::@E@>> update(@TPC@std::int64_t id, std::string name);
+syrax::Task<bool>                       remove(@TPC@std::int64_t id);
 
 }  // namespace @E@Repository
 }  // namespace repositories
@@ -746,32 +746,32 @@ using namespace syrax;
 
 namespace repositories::@E@Repository {
 
-Task<std::vector<models::@E@>> all() {
-    co_return co_await Query<models::@E@>().orderBy(&models::@E@::id).get();
+Task<std::vector<models::@E@>> all(@TP@) {
+    co_return co_await Query<models::@E@>()@TFOR@.orderBy(&models::@E@::id).get();
 }
 
-Task<std::optional<models::@E@>> find(std::int64_t id) {
-    co_return co_await Query<models::@E@>().where(&models::@E@::id, "=", id).first();
+Task<std::optional<models::@E@>> find(@TPC@std::int64_t id) {
+    co_return co_await Query<models::@E@>()@TFOR@.where(&models::@E@::id, "=", id).first();
 }
 
-Task<models::@E@> create(std::string name) {
-    models::@E@ @e@{.name = std::move(name)};
+Task<models::@E@> create(@TPC@std::string name) {
+    models::@E@ @e@{.name = std::move(name)};@TSET@
     co_await save(@e@);
     co_return @e@;
 }
 
-Task<std::optional<models::@E@>> update(std::int64_t id, std::string name) {
-    const auto changed = co_await Query<models::@E@>()
+Task<std::optional<models::@E@>> update(@TPC@std::int64_t id, std::string name) {
+    const auto changed = co_await Query<models::@E@>()@TFOR@
                              .where(&models::@E@::id, "=", id)
                              .set(&models::@E@::name, std::move(name))
                              .update();
 
     if (changed == 0) co_return std::nullopt;
-    co_return co_await find(id);
+    co_return co_await find(@TAC@id);
 }
 
-Task<bool> remove(std::int64_t id) {
-    co_return (co_await Query<models::@E@>().where(&models::@E@::id, "=", id).del()) > 0;
+Task<bool> remove(@TPC@std::int64_t id) {
+    co_return (co_await Query<models::@E@>()@TFOR@.where(&models::@E@::id, "=", id).del()) > 0;
 }
 
 }  // namespace repositories::@E@Repository
@@ -791,12 +791,12 @@ inline constexpr std::string_view kGenServiceH = R"T(#pragma once
 namespace services {
 
 namespace @E@Service {
-syrax::Task<std::vector<models::@E@>>   list();
-syrax::Task<std::optional<models::@E@>> byId(std::int64_t id);
+syrax::Task<std::vector<models::@E@>>   list(@TP@);
+syrax::Task<std::optional<models::@E@>> byId(@TPC@std::int64_t id);
 
-syrax::Task<models::@E@>                create(requests::Create@E@ input);
-syrax::Task<std::optional<models::@E@>> update(std::int64_t id, requests::Update@E@ input);
-syrax::Task<bool>                       remove(std::int64_t id);
+syrax::Task<models::@E@>                create(@TPC@requests::Create@E@ input);
+syrax::Task<std::optional<models::@E@>> update(@TPC@std::int64_t id, requests::Update@E@ input);
+syrax::Task<bool>                       remove(@TPC@std::int64_t id);
 
 }  // namespace @E@Service
 }  // namespace services
@@ -812,24 +812,24 @@ namespace services::@E@Service {
 
 namespace repo = repositories::@E@Repository;
 
-Task<std::vector<models::@E@>> list() {
-    co_return co_await repo::all();
+Task<std::vector<models::@E@>> list(@TP@) {
+    co_return co_await repo::all(@TA@);
 }
 
-Task<std::optional<models::@E@>> byId(std::int64_t id) {
-    co_return co_await repo::find(id);
+Task<std::optional<models::@E@>> byId(@TPC@std::int64_t id) {
+    co_return co_await repo::find(@TAC@id);
 }
 
-Task<models::@E@> create(requests::Create@E@ input) {
-    co_return co_await repo::create(std::move(input.name));
+Task<models::@E@> create(@TPC@requests::Create@E@ input) {
+    co_return co_await repo::create(@TAC@std::move(input.name));
 }
 
-Task<std::optional<models::@E@>> update(std::int64_t id, requests::Update@E@ input) {
-    co_return co_await repo::update(id, std::move(input.name));
+Task<std::optional<models::@E@>> update(@TPC@std::int64_t id, requests::Update@E@ input) {
+    co_return co_await repo::update(@TAC@id, std::move(input.name));
 }
 
-Task<bool> remove(std::int64_t id) {
-    co_return co_await repo::remove(id);
+Task<bool> remove(@TPC@std::int64_t id) {
+    co_return co_await repo::remove(@TAC@id);
 }
 
 }  // namespace services::@E@Service
@@ -847,16 +847,16 @@ inline constexpr std::string_view kGenControllerH = R"T(#pragma once
 
 namespace controllers::@E@Controller {
 
-syrax::Task<syrax::Result<std::vector<resources::@E@Resource>>> index();
+syrax::Task<syrax::Result<std::vector<resources::@E@Resource>>> index(@CP@);
 
-syrax::Task<syrax::Result<resources::@E@Resource>> show(std::int64_t id);
+syrax::Task<syrax::Result<resources::@E@Resource>> show(@CPC@std::int64_t id);
 
-syrax::Task<syrax::Result<resources::@E@Resource>> store(requests::Create@E@ body);
+syrax::Task<syrax::Result<resources::@E@Resource>> store(@CPC@requests::Create@E@ body);
 
-syrax::Task<syrax::Result<resources::@E@Resource>> update(std::int64_t id,
+syrax::Task<syrax::Result<resources::@E@Resource>> update(@CPC@std::int64_t id,
                                                           requests::Update@E@ body);
 
-syrax::Task<syrax::Result<resources::DeletedResource>> destroy(std::int64_t id);
+syrax::Task<syrax::Result<resources::DeletedResource>> destroy(@CPC@std::int64_t id);
 
 }  // namespace controllers::@E@Controller
 )T";
@@ -870,31 +870,33 @@ using namespace syrax;
 namespace controllers::@E@Controller {
 
 namespace service = services::@E@Service;
-
-Task<Result<std::vector<resources::@E@Resource>>> index() {
-    co_return resources::from(co_await service::list());
+@CHELP@
+Task<Result<std::vector<resources::@E@Resource>>> index(@CP@) {
+    co_return resources::from(co_await service::list(@CA@));
 }
 
-Task<Result<resources::@E@Resource>> show(std::int64_t id) {
-    const auto @e@ = co_await service::byId(id);
+Task<Result<resources::@E@Resource>> show(@CPC@std::int64_t id) {
+    const auto @e@ = co_await service::byId(@CAC@id);
     if (!@e@) co_return NotFound("@e@ not found").as("@e@_no_encontrado");
 
     co_return resources::from(*@e@);
 }
 
-Task<Result<resources::@E@Resource>> store(requests::Create@E@ body) {
-    co_return resources::from(co_await service::create(std::move(body)));
+Task<Result<resources::@E@Resource>> store(@CPC@requests::Create@E@ body) {
+    co_return resources::from(co_await service::create(@CAC@std::move(body)));
 }
 
-Task<Result<resources::@E@Resource>> update(std::int64_t id, requests::Update@E@ body) {
-    const auto @e@ = co_await service::update(id, std::move(body));
+Task<Result<resources::@E@Resource>> update(@CPC@std::int64_t id, requests::Update@E@ body) {
+    const auto @e@ = co_await service::update(@CAC@id, std::move(body));
     if (!@e@) co_return NotFound("@e@ not found").as("@e@_no_encontrado");
 
     co_return resources::from(*@e@);
 }
 
-Task<Result<resources::DeletedResource>> destroy(std::int64_t id) {
-    if (!co_await service::remove(id)) co_return NotFound("@e@ not found").as("@e@_no_encontrado");
+Task<Result<resources::DeletedResource>> destroy(@CPC@std::int64_t id) {
+    if (!co_await service::remove(@CAC@id)) {
+        co_return NotFound("@e@ not found").as("@e@_no_encontrado");
+    }
 
     co_return resources::DeletedResource{.id = id, .deleted = true};
 }
@@ -933,7 +935,7 @@ struct @E@ : syrax::Migration {
 
     void up(syrax::Schema& schema) override {
         schema.create("@es@", [](syrax::Blueprint& table) {
-            table.id();
+            table.id();@TMIG@
             table.string("name");
             table.timestamps();
         });

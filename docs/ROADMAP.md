@@ -32,7 +32,7 @@ a veces con otro nombre. Conviene mirar aquí primero.
 | **OAuth2 / OIDC (validar)** | `jwks.hpp` → `auth::jwks(url)` | Tokens de Auth0, Keycloak o Cognito. Ser el proveedor sigue fuera. |
 | **Subida de archivos** | `uploads.hpp` → `Uploads`, `upload()` | Firma de bytes para imágenes y pdf. El guardado no: eso es storage. |
 | **Métricas** | `app.metrics()` | Cuatro contadores en formato Prometheus. |
-| **Multi-tenancy por fila** | `Query<T>::forTenant(id)` | Olvidarlo lanza, no filtra. |
+| **Multi-tenancy por fila** | `Query<T>::forTenant(id)`, `syrax make:api X --tenant` | Olvidarlo lanza, no filtra. El CLI lo enhebra por todas las capas. |
 | **DTOs** | `resources/` y `requests/` del andamiaje | Son DTOs de entrada y de salida, con el nombre que usa el README. |
 | **Cache abstraction** | `cache.hpp` → `get/put/forget/has/remember` | La abstracción existe; el único driver es Redis. |
 | **Healthcheck** | `health.hpp` → `app.health()` | Pregunta a cada base y cada Redis registrados. `health::probe()` agrega las del proyecto. |

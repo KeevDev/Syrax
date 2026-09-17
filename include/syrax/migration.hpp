@@ -213,6 +213,20 @@ public:
         timestamp("updated_at").defaultTo(now_);
     }
 
+    // tenant_id, la columna de multi-tenancy por fila.
+    //
+    // Con indice por el mismo motivo que deleted_at, y es aun mas claro aqui:
+    // una vez que el modelo declara `tenant`, TODA consulta suya lleva
+    // "tenant_id = ?" -el framework no deja ejecutar ninguna sin el-, asi que
+    // es literalmente la columna mas filtrada de la tabla.
+    //
+    // No es nullable: una fila sin tenant en una tabla multi-tenant no es de
+    // nadie, y no aparece en ninguna consulta. Si aparece, es un bug de carga
+    // de datos, y vale mas que lo pare la base.
+    Column& tenantId(std::string name = "tenant_id") {
+        return string(std::move(name)).index();
+    }
+
     // deleted_at, la columna del borrado logico.
     //
     // Nullable y con indice: una vez que softDeletes esta puesto, TODA consulta

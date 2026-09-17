@@ -1165,6 +1165,26 @@ Se pasa explícito y no por un contexto implícito porque **con corrutinas no ha
 
 Sólo el modelo **por fila**: el de esquema y el de base por tenant son decisiones que no se pueden desandar, y un framework no debería elegirlas por ti.
 
+**El CLI lo genera entero:**
+
+```bash
+syrax make:api Factura --tenant
+```
+
+Eso escribe el modelo con el marcador y el campo, la migración con `table.tenantId()` —indexada, porque toda consulta del modelo la filtra— y el `tenant` enhebrado por **todas** las firmas, del controlador al repositorio, hasta el `.forTenant()`.
+
+Es verboso y es a propósito: como el framework no deja ejecutar una consulta sin el tenant, o viaja por la firma o no compila. Un parámetro que se ve en cada capa es mejor que un contexto implícito que con corrutinas no se puede tener.
+
+Lo único que queda por decidir es de dónde sale, y el generador deja la función escrita y marcada en un solo sitio:
+
+```cpp
+// CAMBIA ESTO. Lo normal es un claim del token, pero también puede venir
+// del subdominio o de una cabecera.
+std::string tenantOf(const Request& request) {
+    return actorFrom(request).id;
+}
+```
+
 ---
 
 ### Middleware, autenticación y políticas

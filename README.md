@@ -72,9 +72,9 @@ Y la documentación interactiva en **http://localhost:8080/docs**.
 
 La primera compilación tarda unos minutos porque baja y compila Drogon; las siguientes son de segundos.
 
----
+### El asistente de `syrax new`
 
-**`syrax new` pregunta tres cosas** si hay terminal: el motor de base, si quieres Redis para cache y colas, y qué autenticación. Cada una cambia archivos de verdad —el `docker-compose`, la conexión, el middleware, la configuración y el `.env`—, que es el único motivo por el que una pregunta merece estar ahí.
+**Pregunta tres cosas** si hay terminal: el motor de base, si quieres Redis para cache y colas, y qué autenticación. Cada una cambia archivos de verdad —el `docker-compose`, la conexión, el middleware, la configuración y el `.env`—, que es el único motivo por el que una pregunta merece estar ahí.
 
 ```bash
 syrax new pedidos --db postgres --cache --auth jwks   # sin preguntas, para un script
@@ -84,9 +84,29 @@ No pregunta por `/docs`: eso cambia una línea (`app.withoutDocs()`), y una preg
 
 Con `--auth`, el `.env` y `config.hpp` quedan cableados de verdad y `middleware.cpp` trae la línea exacta **comentada**. No es pereza: qué rutas protege es una decisión tuya, y un `app.use(cfg.apiBase, ...)` a ciegas protegería también el propio login.
 
-## Qué trae
+---
 
-### El camino de una petición
+## Índice
+
+**Empezar** — [Instalación](#instalación) · [`syrax new`](#el-asistente-de-syrax-new) · [El camino de una petición](#el-camino-de-una-petición)
+
+**[La petición](#la-petición)** — [Errores como valores](#errores-como-valores) · [Validación](#validación) · [Paginación](#paginación) · [Serialización parcial](#serialización-parcial) · [ETag y 304](#etag-y-304) · [Archivos subidos](#archivos-subidos) · [WebSockets](#websockets)
+
+**[La base de datos](#la-base-de-datos)** — [Consultas y transacciones](#consultas-y-transacciones) · [Query builder tipado](#query-builder-tipado) · [Migraciones en C++](#migraciones-en-c) · [Soft deletes y timestamps](#soft-deletes-y-timestamps) · [Multi-tenancy](#multi-tenancy)
+
+**[Seguridad](#seguridad)** — [Middleware, autenticación y políticas](#middleware-autenticación-y-políticas) · [Permisos finos](#permisos-finos) · [Tokens de otro proveedor](#tokens-de-otro-proveedor) · [Rate limiting](#rate-limiting) · [Reintentos seguros](#reintentos-seguros) · [Auditoría](#auditoría)
+
+**[Fuera de la petición](#fuera-de-la-petición)** — [Colas de trabajos](#colas-de-trabajos) · [Tareas periódicas](#tareas-periódicas) · [Cache](#cache) · [Llamar a otra API](#llamar-a-otra-api)
+
+**[Operación](#operación)** — [Configuración](#configuración) · [Configuración tipada](#configuración-tipada) · [Trazabilidad](#trazabilidad) · [Salud](#salud) · [Métricas](#métricas) · [OpenAPI automático](#openapi-automático) · [Recarga al guardar](#recarga-al-guardar)
+
+**Tu proyecto** — [Estructura](#estructura-de-un-proyecto) · [Tests](#tests-en-tu-proyecto) · [Comandos](#comandos)
+
+**El framework** — [Tests y CI](#tests-y-ci) · [Limitaciones](#limitaciones-conocidas) · [No-objetivos](#no-objetivos) · [Cómo funciona](#cómo-funciona)
+
+---
+
+## El camino de una petición
 
 Un endpoint no es un archivo: es una cadena de capas, cada una con un trabajo y un tipo distinto. Esto es `POST /users` entero, de la URL a la tabla y de vuelta.
 
@@ -289,6 +309,12 @@ GET     /api/v1/posts/{id}              posts.show
 PUT     /api/v1/posts/{id}              posts.update
 ```
 
+---
+
+## La petición
+
+Lo que ocurre entre que entra el JSON y sale la respuesta.
+
 ### Errores como valores
 
 ```cpp
@@ -416,7 +442,88 @@ Tres detalles que no son accidentales:
 
 Un `std::optional<T>` ausente no se valida: "no vino" es asunto de presencia, no de contenido.
 
-### Base de datos sin modelos generados
+### Paginación
+
+```cpp
+co_return co_await syrax::Query<models::User>()
+              .orderBy(&models::User::id)
+              .paginate(page, perPage);
+```
+
+Devuelve un `Page<T>` —`data`, `total`, `page`, `perPage`, `pages`, `hasMore`— y OpenAPI lo documenta solo, porque sale del mismo tipo. `pages` y `hasMore` se calculan aquí a propósito: son la división entera que en el cliente alguien redondea mal.
+
+Son **dos consultas**, el `count` y el `select`: no hay forma de hacerlo en una sin window functions, que SQLite y los MySQL viejos no tienen. En una tabla grande el caro es el `count(*)`.
+
+Sin `orderBy` el orden lo decide el motor y puede cambiar entre páginas —la fila que estaba en la 1 reaparece en la 2—, pero no se impone: la clave de orden es del que consulta.
+
+### Serialización parcial
+
+```cpp
+app.partial();
+```
+
+```
+GET /api/v1/users?fields=id,name
+[{"id":1,"name":"Ada"}, ...]
+```
+
+Sobre una página filtra **dentro de `data`** y deja el sobre entero, para que el cliente no pierda `total` ni `page` por pedir dos campos. Un nombre que no existe se ignora; si no existe **ninguno**, es un 400: un `?fields=nombre` donde el campo es `name` devolvería `[{},{},{}]`, y el cliente no tendría forma de saber que se equivocó.
+
+Se para ahí. Lo siguiente que pide todo el mundo es anidar —`fields=user{name,posts{title}}`— y eso ya no es un parámetro, es un lenguaje de consulta con su parser y su problema N+1. Si hace falta eso, hace falta GraphQL.
+
+### ETag y 304
+
+```cpp
+app.etag();
+```
+
+Cada GET de éxito sale con un `ETag` calculado sobre su cuerpo, y una petición que lo traiga en `If-None-Match` recibe un **304 sin cuerpo**. Para un recurso que cambia poco y se pide mucho, eso es la diferencia entre mandar el JSON entero cada vez y mandar una línea de cabeceras.
+
+Ahorra red, no trabajo: el cuerpo se genera igual para poder hashearlo. Ahorrarse también el trabajo obliga a saber cuándo cambió el recurso, y eso solo lo sabe la aplicación.
+
+### Archivos subidos
+
+```cpp
+const syrax::Uploads archivos{request};
+
+const auto fallos = archivos.check({
+    syrax::upload("avatar").required().maxSize(2 * 1024 * 1024).image(),
+    syrax::upload("cv").maxSize(5 * 1024 * 1024).extensions({"pdf"}).pdf(),
+});
+if (!fallos.empty()) co_return syrax::Error{422, "validation failed", "", "", fallos};
+```
+
+Devuelve `FieldError`, el mismo tipo que `validate()`, así que el 422 sale por el camino de siempre.
+
+**No hay filtro por tipo MIME, y es deliberado.** El tipo que viaja en el multipart lo declara el cliente: subir un `.php` diciendo que es `image/png` es el ataque de manual, así que un `mimes({"image/png"})` da una sensación de seguridad que no corresponde a nada. Lo que sí significa algo es `image()` y `pdf()`, que miran los **primeros bytes** del archivo — lo único que no se puede falsificar sin falsificar el contenido.
+
+**Guardar no entra.** Es elegir dónde, cómo se nombra para que dos subidas no se pisen, quién lo borra y qué pasa cuando el disco se llena. Eso es storage, y storage no es finito. El contenido está en `bytes`.
+
+### WebSockets
+
+```cpp
+syrax::Room sala;
+
+app.ws("/chat", {
+    .onOpen    = [&](const Socket& s) { sala.join(s); },
+    .onMessage = [&](const Socket&, std::string_view text) { sala.broadcast(text); },
+    .onClose   = [&](const Socket& s) { sala.leave(s); },
+});
+```
+
+`Room` es un grupo de conexiones al que se emite de una vez, con su sincronización resuelta: Drogon reparte las conexiones entre varios event loops, así que sin esto cada proyecto tendría que rehacer el registro y su mutex.
+
+`Socket` trae `send`, `sendJson` (el mismo struct que sirve un endpoint REST sirve un mensaje de socket), `close`, `ip` y `set`/`get` para estado por conexión — lo típico es guardar ahí el usuario que quedó autenticado en `onOpen`.
+
+Los middlewares de Syrax **no** corren sobre sockets: operan sobre respuestas HTTP, y un socket deja de tenerlas después del handshake. La autenticación va dentro de `onOpen`.
+
+---
+
+## La base de datos
+
+Sin modelos generados: Glaze mapea la fila al struct por reflexión, en compilación. El SQL a mano y el query builder conviven en el mismo repositorio.
+
+### Consultas y transacciones
 
 Un modelo es un struct plano:
 
@@ -478,7 +585,7 @@ co_return co_await db::transaction(
 
 **El COMMIT se espera.** Drogon confirma la transacción al destruirla, en otro hilo: si falla —un deadlock, un *serialization failure*, una clave ajena diferida— eso ocurre **después** de que tu controlador devolvió el 201, y nadie se entera. Syrax espera esa confirmación y lanza `db::CommitFailed` si no llegó, así que un COMMIT roto sale por donde salen los demás errores y no como una fila que no está.
 
-#### Query builder tipado
+### Query builder tipado
 
 Para lo de todos los días —filtrar, ordenar, paginar, guardar— escribir el SQL a mano es repetir la lista de columnas en cuatro sitios y que una errata en `emial` la descubra producción. `Query<T>` cubre ese caso, y sólo ese. El modelo declara su tabla y ya:
 
@@ -550,42 +657,6 @@ Cuatro cosas que lo separan de escribir el `SELECT`:
 
 **Lo que no hace, a propósito: joins, relaciones, subconsultas, `GROUP BY`.** Ahí un query builder deja de tener fondo y acaba siendo un dialecto de SQL peor que SQL. Para eso `db::query` sigue donde estaba, y las dos formas conviven en el mismo repositorio —de hecho el que genera `syrax new` usa una para lo simple y la otra para lo que no lo es.
 
-#### Y si quieres `Mapper<T>`, puedes
-
-Syrax usa `orm_lib` de Drogon entero —pool, corrutinas, transacciones, prepared statements— salvo `Mapper<T>`. Pero **no te lo impide**: corre sobre el mismo `DbClient`, así que convive en el mismo proyecto y en la misma transacción.
-
-```bash
-syrax make:model users     # escribe model.json con lo que hay en tu .env
-```
-
-Deja el modelo en `src/models/generated/`. La primera vez construye `drogon_ctl` desde el Drogon que ya bajó FetchContent —tarda varios minutos, pero queda cacheado en `build/_ctl/`— y necesita la base levantada, porque el esquema lo lee de ella. Por eso no se hace en `syrax new`: ahí todavía no hay base.
-
-```cpp
-#include <drogon/orm/CoroMapper.h>
-#include "models/Users.h"
-
-CoroMapper<drogon_model::api::Users> mapper(syrax::db::client());
-
-const auto total = co_await mapper.count();
-const auto page  = co_await mapper.orderBy(Users::Cols::_id).limit(3).findAll();
-const auto uno   = co_await mapper.findByPrimaryKey(1);
-```
-
-Lo bueno que te llevas: **nombres de columna tipados** (`Users::Cols::_id` con una errata no compila) y `Criteria` para filtros compuestos.
-
-Lo que cuesta, medido sobre una tabla `users` de 6 columnas generada con `drogon_ctl`:
-
-| | líneas |
-|---|---|
-| `models/Users.h` + `Users.cc` | **1.632**, generadas |
-| el `struct User` equivalente | **15**, escritas |
-
-Unas 270 líneas por columna. Además cada campo es `std::shared_ptr<T>` (`getValueOfId()` / `getId()`), hay tres setters por columna, y regenerar exige `drogon_ctl` con la base levantada en tiempo de build.
-
-Para cuatro columnas no compensa. Para un dominio grande con filtros dinámicos, empieza a pagar. La decisión es tuya, tabla por tabla.
-
-> **Un tipo que se refleja no puede vivir en un namespace anónimo.** Glaze saca los nombres de los campos a través de una variable `extern`, y un tipo sin enlace no puede nombrarse desde otra unidad de traducción. GCC lo deja pasar; **Clang lo rechaza** con `used but not defined in this translation unit`. Aplica a todo lo que Syrax serializa o mapea: bodies, resources y modelos. Ponlos en un namespace con nombre — que es donde el andamiaje los pone.
-
 ### Migraciones en C++
 
 ```cpp
@@ -642,166 +713,289 @@ schema.table("users", [](Blueprint& t) {
 
 > **`.change()` no existe en SQLite.** Postgres y MySQL lo soportan —cada uno con su sintaxis, que Syrax escribe por ti—; SQLite únicamente tiene `RENAME`, `ADD COLUMN` y `DROP COLUMN`, así que cambiar un tipo exige reconstruir la tabla entera. Syrax lanza un error que lo dice y apunta a `Schema::raw()` en vez de generar SQL que el motor va a rechazar. Es una limitación de SQLite, no de Syrax.
 
-### OpenAPI automático
+### Soft deletes y timestamps
 
-`/openapi.json` y `/docs` con Swagger UI, generados de las rutas registradas. **Los esquemas salen de los mismos tipos que usan los controladores**, así que la documentación no puede desincronizarse del código: no hay anotaciones que mantener.
-
-```cpp
-app.docs("Mi API", "2.0.0");   // titulo y version
-app.withoutDocs();             // apagarlo en produccion
-```
-
-Eso incluye los path params: un controlador que declara `show(std::int64_t id)` documenta `{id}` como `integer`, no como `string`. El tipo lo pone la firma, igual que el resto.
-
-Y el documento se puede sacar sin levantar el servidor, para volcarlo en CI o generar clientes:
+Se declaran en el modelo, no se deducen de que existan las columnas. Deducirlas sería más corto de escribir y peor de vivir: alguien agrega un `deleted_at` para su propia contabilidad y de pronto DELETE deja de borrar, sin que nada en su código lo diga.
 
 ```cpp
-const auto spec = app.openApi();   // lo mismo que sirve /openapi.json
+struct Pedido {
+    std::int64_t id;
+    // ...
+    static constexpr auto table       = "pedidos";
+    static constexpr auto timestamps  = true;   // created_at / updated_at
+    static constexpr auto softDeletes = true;   // deleted_at
+};
 ```
-
-### Recarga al guardar
-
-`syrax serve` se queda de padre del servidor y vigila `src/` y `database/`. Guardas un `.cpp` y recompila y vuelve a levantar solo; `r` lo fuerza a mano y `q` sale.
-
-**Si no compila, el servidor anterior sigue vivo.** Quedarte sin servidor justo cuando acabas de romper el código es lo contrario de lo que quieres: verás el error del compilador y el binario de antes seguirá respondiendo hasta que arregles.
-
-Sin terminal interactiva —un contenedor, CI, una tubería— no hay teclado que escuchar y se comporta como siempre. `--no-watch` apaga la vigilancia.
-
-### Configuración
-
-La configuración de un proyecto vive en `src/bootstrap/`, un archivo por cosa que se configura, y son funciones C++ normales — no un formato que haya que aprender:
-
-```
-src/bootstrap/
-├── app.cpp         junta todo: base de la API, y llama a las de abajo
-├── config.cpp      toda la configuración, tipada y validada al arrancar
-├── schedule.cpp    las tareas periódicas
-├── database.cpp    la conexión a la base
-├── cache.cpp       el Redis, si lo enciendes
-├── queue.cpp       el driver de la cola y los jobs registrados
-├── middleware.cpp  CORS, rate limit y cabeceras de seguridad
-└── errors.cpp      qué excepciones merecen otro estado
-```
-
-`config.cpp` va primero y el resto lee de él: así un `DB_POOL=cuatro` falla al
-arrancar con el nombre de la variable, y no en la primera consulta.
 
 ```cpp
-// src/bootstrap/middleware.cpp
-void middleware(syrax::App& app) {
-    app.cors({
-        .origins     = {syrax::env("CORS_ORIGINS", "*")},
-        .credentials = syrax::envBool("CORS_CREDENTIALS", false),
-    });
+co_await Query<Pedido>().where(&Pedido::id, "=", id).del();   // marca, no borra
 
-    app.useOnResponse(syrax::securityHeaders());
-
-    app.use(syrax::rateLimit(syrax::envInt("RATE_LIMIT", 120), std::chrono::minutes{1}));
-}
+Query<Pedido>().withTrashed()    // también los borrados
+Query<Pedido>().onlyTrashed()    // la papelera
+Query<Pedido>().restore()        // deshacer
+Query<Pedido>().forceDelete()    // borrar de verdad
 ```
 
-Los tres middlewares vienen puestos en todo proyecto nuevo. Antes existían y no los usaba nadie, porque no se veían desde ningún sitio.
+Y en la migración, `table.timestamps()` y `table.softDeletes()` —esta última nullable y **con índice**, porque a partir de ahí toda consulta del modelo lleva `deleted_at IS NULL` y es la columna más consultada de la tabla.
+
+La hora la pone la **base**, no el proceso: con varias instancias los relojes difieren y dos filas creadas en orden pueden quedar con timestamps cruzados.
+
+Si el modelo declara `created_at` como campo, se **lee** pero no se escribe desde el struct: un objeto recién construido lo tiene vacío y lo pisaría con basura.
+
+### Multi-tenancy
 
 ```cpp
-// src/bootstrap/database.cpp
-void database() {
-    syrax::db::connect({
-        .engine      = syrax::env("DB_ENGINE", "postgres"),
-        .host        = syrax::env("DB_HOST", "127.0.0.1"),
-        .port        = static_cast<unsigned short>(syrax::envInt("DB_PORT", 0)),
-        .database    = syrax::env("DB_NAME", "api"),
-        .username    = syrax::env("DB_USER", "postgres"),
-        .password    = syrax::env("DB_PASSWORD", "postgres"),
-        .connections = static_cast<std::size_t>(syrax::envInt("DB_POOL", 4)),
-    });
-}
+struct Factura {
+    std::int64_t id;
+    std::string  tenant_id;
+    // ...
+    static constexpr auto table  = "facturas";
+    static constexpr auto tenant = true;
+};
+
+co_await syrax::Query<Factura>().forTenant(actor.tenant).get();
 ```
 
-El valor por defecto está **al lado** de la clave, y se ve de un vistazo qué lee la app del entorno. `syrax::env`, `envInt` y `envBool` leen el proceso con respaldo al `.env`; lo que ya existe en el entorno gana siempre, para que el despliegue pueda pisar el archivo. Un valor mal escrito (`DB_PORT=cinco`) avisa por `stderr` en vez de caer en silencio al default.
+**Olvidar el `forTenant` lanza.** Es la decisión central: el fallo que esta feature no se puede permitir es servirle a un cliente los datos de otro, y con el tenant pasándose a mano basta olvidarlo una vez en un repositorio para que pase, en silencio y en producción. Un error ruidoso en la primera prueba convierte un fallo de seguridad en uno de programación normal.
 
-Llamar varias veces a `connect()` con `name` distinto da varias conexiones; `db::client("informes")` pide una por nombre.
+Se pasa explícito y no por un contexto implícito porque **con corrutinas no hay contexto por petición fiable**: un `co_await` reanuda en otro hilo, y un `thread_local` ahí no da un error, da los datos del tenant equivocado de vez en cuando. Es la misma trampa que documenta el apartado de inyección de dependencias.
 
-**El puerto** se resuelve de más a menos prioridad:
+Sólo el modelo **por fila**: el de esquema y el de base por tenant son decisiones que no se pueden desandar, y un framework no debería elegirlas por ti.
+
+**El CLI lo genera entero:**
 
 ```bash
-./mi-api 3000        # 1. argumento explícito
-APP_PORT=3000        # 2. entorno, o el .env
-                     # 3. 8080
+syrax make:api Factura --tenant
 ```
 
-**La base de la API** se declara una vez, en `bootstrap/app.cpp`, y las rutas cuelgan de ahí:
+Eso escribe el modelo con el marcador y el campo, la migración con `table.tenantId()` —indexada, porque toda consulta del modelo la filtra— y el `tenant` enhebrado por **todas** las firmas, del controlador al repositorio, hasta el `.forTenant()`.
+
+Es verboso y es a propósito: como el framework no deja ejecutar una consulta sin el tenant, o viaja por la firma o no compila. Un parámetro que se ve en cada capa es mejor que un contexto implícito que con corrutinas no se puede tener.
+
+Lo único que queda por decidir es de dónde sale, y el generador deja la función escrita y marcada en un solo sitio:
 
 ```cpp
-app.base(syrax::env("API_BASE", "/api/v1"));   // en bootstrap
-routes::v1::register_(app.api());              // en routes/routes.cpp
-```
-
-Cambiar `API_BASE` mueve la API entera sin tocar una sola ruta. Lo que no es de la API —un `/health`, los estáticos— se sigue registrando con su ruta completa: la base no es un prefijo global.
-
-### Trazabilidad
-
-Cada petición recibe un identificador corto, y con él se puede encontrar *esa* petición entre todas las demás. Va puesto de fábrica: no hay nada que encender.
-
-```
-201  POST   /api/v1/users                          12.4ms  7dw1ubha8o09
-404  GET    /api/v1/users/9999                      0.8ms  k2p0zx4mq1te
-500  POST   /api/v1/orders                         31.7ms  9a8sbd03nfl2
-```
-
-Eso es lo que ves en la terminal mientras desarrollas. Detrás de un pipe —un contenedor, el CI, un recolector de logs— la misma información sale como una línea JSON por evento, porque es lo que esas herramientas saben leer:
-
-```json
-{"ts":"2026-09-16T04:42:27.380Z","level":"info","msg":"request","method":"POST","path":"/users","status":"201","ms":"12.4","ip":"127.0.0.1","request_id":"7dw1ubha8o09"}
-```
-
-El id viaja en la cabecera `X-Request-Id` de la respuesta, así que quien reporta un fallo tiene algo que citar. Y si la petición **ya traía** una —porque la mandó un gateway u otro servicio—, se respeta: la traza cruza el salto entera.
-
-Para tus propios eventos:
-
-```cpp
-syrax::log::info("pedido confirmado", {{"pedido", std::to_string(id)},
-                                       {"request_id", syrax::log::requestId(request)}});
-```
-
-| Variable | Qué hace |
-|---|---|
-| `LOG_FORMAT` | `json` o `text`. Por defecto: texto si hay terminal, JSON si no. |
-| `LOG_LEVEL` | `debug`, `info`, `warn`, `error`. Por defecto `info`. |
-| `LOG_ACCESS` | `0` apaga la línea por petición. |
-
-### Cache
-
-Redis, configurado igual que la base y apagado hasta que lo enciendas:
-
-```cpp
-// src/bootstrap/cache.cpp
-void cache() {
-    if (!syrax::envBool("CACHE_ENABLED", false)) return;
-
-    syrax::cache::connect({
-        .host = syrax::env("REDIS_HOST", "127.0.0.1"),
-        .port = static_cast<unsigned short>(syrax::envInt("REDIS_PORT", 6379)),
-    });
+// CAMBIA ESTO. Lo normal es un claim del token, pero también puede venir
+// del subdominio o de una cabecera.
+std::string tenantOf(const Request& request) {
+    return actorFrom(request).id;
 }
 ```
 
-```cpp
-co_await cache::put("users.total", "42", std::chrono::minutes{10});
-const auto total = co_await cache::get("users.total");   // optional<string>
-co_await cache::forget("users.total");
+### Y si quieres `Mapper<T>`, puedes
+
+Syrax usa `orm_lib` de Drogon entero —pool, corrutinas, transacciones, prepared statements— salvo `Mapper<T>`. Pero **no te lo impide**: corre sobre el mismo `DbClient`, así que convive en el mismo proyecto y en la misma transacción.
+
+```bash
+syrax make:model users     # escribe model.json con lo que hay en tu .env
 ```
 
-Y el patrón de siempre, que además serializa por ti:
+Deja el modelo en `src/models/generated/`. La primera vez construye `drogon_ctl` desde el Drogon que ya bajó FetchContent —tarda varios minutos, pero queda cacheado en `build/_ctl/`— y necesita la base levantada, porque el esquema lo lee de ella. Por eso no se hace en `syrax new`: ahí todavía no hay base.
 
 ```cpp
-co_return co_await cache::remember<std::vector<User>>(
-    "users.activos", std::chrono::minutes{10},
-    [] { return repo::activos(); });
+#include <drogon/orm/CoroMapper.h>
+#include "models/Users.h"
+
+CoroMapper<drogon_model::api::Users> mapper(syrax::db::client());
+
+const auto total = co_await mapper.count();
+const auto page  = co_await mapper.orderBy(Users::Cols::_id).limit(3).findAll();
+const auto uno   = co_await mapper.findByPrimaryKey(1);
 ```
 
-El valor viaja como JSON, así que sirve para cualquier struct que el resto del framework ya sabe serializar. Si el JSON guardado ya no encaja con el tipo —cambiaste el struct— se trata como un fallo de cache: se recalcula y se pisa, en vez de reventar.
+Lo bueno que te llevas: **nombres de columna tipados** (`Users::Cols::_id` con una errata no compila) y `Criteria` para filtros compuestos.
 
-`cache::client()` da el `RedisClient` de Drogon para todo lo demás. Pedirlo antes de `app.run()` lanza con un mensaje en vez de un segfault: Drogon crea sus clientes al arrancar.
+Lo que cuesta, medido sobre una tabla `users` de 6 columnas generada con `drogon_ctl`:
+
+| | líneas |
+|---|---|
+| `models/Users.h` + `Users.cc` | **1.632**, generadas |
+| el `struct User` equivalente | **15**, escritas |
+
+Unas 270 líneas por columna. Además cada campo es `std::shared_ptr<T>` (`getValueOfId()` / `getId()`), hay tres setters por columna, y regenerar exige `drogon_ctl` con la base levantada en tiempo de build.
+
+Para cuatro columnas no compensa. Para un dominio grande con filtros dinámicos, empieza a pagar. La decisión es tuya, tabla por tabla.
+
+> **Un tipo que se refleja no puede vivir en un namespace anónimo.** Glaze saca los nombres de los campos a través de una variable `extern`, y un tipo sin enlace no puede nombrarse desde otra unidad de traducción. GCC lo deja pasar; **Clang lo rechaza** con `used but not defined in this translation unit`. Aplica a todo lo que Syrax serializa o mapea: bodies, resources y modelos. Ponlos en un namespace con nombre — que es donde el andamiaje los pone.
+
+---
+
+## Seguridad
+
+Quién entra, qué puede hacer, y qué quedó registrado de lo que hizo.
+
+### Middleware, autenticación y políticas
+
+Un middleware es una función que recibe la petición y devuelve un `Error` para cortar, o nada para dejar pasar. Sin clases, sin registro global:
+
+```cpp
+app.useOnResponse(securityHeaders());                    // a toda respuesta
+app.use(rateLimit(100, std::chrono::minutes{1}));        // a toda petición
+app.use("/api/v1/admin", auth::bearer(secreto));         // solo bajo ese prefijo
+app.cors({.origins = {"https://mi-front.com"}});
+```
+
+También hay `requireApiKey(clave)`, que compara en tiempo constante.
+
+**JWT y contraseñas** (HS256 y PBKDF2-SHA256 sobre OpenSSL):
+
+```cpp
+const auto token  = auth::sign({.sub = "42", .role = "admin"}, secreto);
+const auto claims = auth::verify(token, secreto);        // optional<Claims>
+
+const auto hash = auth::hashPassword("secreto");         // 600 000 iteraciones
+const bool ok   = auth::verifyPassword("secreto", hash);
+```
+
+`auth::bearer()` verifica el token y deja el sujeto y el rol en la petición. De ahí sale el actor:
+
+```cpp
+// http/controllers/Post/PostController.cpp
+Task<Result<PostResource>> update(Request req, std::int64_t id, UpdatePost body) {
+    const auto actor = actorFrom(req);
+
+    if (auto denied = requireRole(actor, "admin", "editor")) co_return *denied;
+    // ...
+}
+```
+
+`Request` es opcional y va primero; el body, último. Un controlador que no necesita la petición cruda no la declara.
+
+Una **política** es solo una función que devuelve `optional<Error>`. No hay registro ni resolución por nombre:
+
+```cpp
+namespace policies {
+std::optional<Error> update(const Actor& actor, const Post& post) {
+    if (actor.is("admin"))         return std::nullopt;
+    if (post.authorId == actor.id) return std::nullopt;
+    return Forbidden("no puedes editar este post");
+}
+}
+
+if (auto denied = policies::update(actor, post)) co_return *denied;
+```
+
+`requireRole` distingue **401** (no autenticado) de **403** (rol insuficiente); confundirlos le dice a un atacante si una credencial es válida. `allowIf` y `denyIf` cubren las condiciones sueltas.
+
+Un sistema completo de roles y permisos es una aplicación, no un framework: esto es lo mínimo para escribirlo sin pelearse.
+
+### Permisos finos
+
+Un rol es singular: un actor tiene uno. Los permisos son un conjunto, y viajan en el claim `scope` del token con el formato que define OAuth2 —separados por espacios—, así que un token de Auth0, Keycloak o Cognito ya encaja sin traducir nada.
+
+```cpp
+const auto actor = syrax::actorFrom(request);
+
+if (auto denied = syrax::requireScope(actor, "pedidos:escribir")) co_return *denied;
+```
+
+Ojo a la asimetría con `requireRole`, que no es un descuido: **`requireScope` exige TODOS** los permisos que se le listan, porque listar varios requisitos quiere decir que hacen falta los dos. Cuando la intención es la otra, está `requireAnyScope`, escrito aparte para que la diferencia se lea en el nombre.
+
+Sin comodines: un `pedidos:*` obliga a decidir si cubre `pedidos:escribir:urgente`, y ahí empieza un lenguaje de patrones que no tiene fondo.
+
+### Tokens de otro proveedor
+
+La mitad finita y útil de OAuth2/OIDC: Auth0, Keycloak, Cognito y Entra firman con RS256 y publican sus claves públicas; lo único que tiene que hacer tu API es bajarlas y comprobar la firma.
+
+```cpp
+app.useAsync(syrax::auth::jwks("https://tu-tenant.auth0.com/.well-known/jwks.json",
+                               {.issuer = "https://tu-tenant.auth0.com/",
+                                .audience = "https://api.tuempresa.com"}));
+```
+
+A partir de ahí el token es un token: `auth.sub`, `auth.role` y `auth.scope` quedan en la petición igual que con `bearer()`, y `requireScope()` funciona sobre ellos sin traducir nada.
+
+Tres cosas que separan verificar de fingir que se verifica:
+
+- **El algoritmo se exige, no se lee del token.** Un JWT dice en su propia cabecera con qué se firmó, y obedecerlo es el agujero clásico: `alg=none`, o `alg=HS256` usando la clave **pública** como secreto compartido. Aquí sólo entra RS256, y hay un test por cada uno de esos dos ataques.
+- **Un `kid` desconocido fuerza una recarga, pero con freno.** Los proveedores rotan claves y sin recarga el día de la rotación no entra nadie; recargando en cada fallo, cualquiera tumba tu API mandando tokens con `kid` inventado.
+- **`issuer` y `audience` se comprueban.** Un token de otro cliente del mismo proveedor está perfectamente firmado; lo que dice que no es para ti es el `aud`.
+
+*Ser* el proveedor no entra — discovery, PKCE, refresh, cuatro flujos y sus modos de fallo — y el motivo está en los no-objetivos.
+
+### Rate limiting
+
+El de siempre cuenta en un mapa del proceso:
+
+```cpp
+app.use(syrax::rateLimit(120, std::chrono::minutes{1}));
+```
+
+Con tres réplicas detrás de un balanceador eso deja pasar 360 por minuto, no 120: cada instancia reparte su cuota entera. Para que el número signifique lo que dice, el contador va en Redis:
+
+```cpp
+app.useAsync(syrax::rateLimitShared(120, std::chrono::seconds{60}));
+```
+
+`useAsync` es una segunda cadena de middleware que **puede esperar**, y corre después de todos los síncronos: lo que se puede rechazar sin salir del proceso no paga una ida y vuelta a la red. Los middleware normales siguen siendo síncronos, que es lo que hay que usar mientras sirva.
+
+Los dos aceptan por quién contar. Por IP de fábrica; una API autenticada casi siempre quiere otra cosa:
+
+```cpp
+syrax::rateLimitShared(1000, std::chrono::seconds{60},
+                       [](const syrax::Request& r) { return r.header("X-Api-Key"); });
+```
+
+Dos decisiones que conviene saber:
+
+- **La ventana es fija**, con su índice dentro de la clave. En el peor caso —una ráfaga al final de una ventana y otra al principio de la siguiente— pasan hasta 2x el límite en un intervalo corto. La alternativa deslizante cuesta una entrada por petición; para proteger de abuso, la fija sobra.
+- **Si Redis no responde, la petición pasa.** Un limitador que tumba la API cuando se cae su almacén convierte una degradación en una caída, y existe para proteger la API, no para ser otro motivo de que no funcione.
+
+### Reintentos seguros
+
+El cliente manda `POST /pedidos`, la red se corta antes de que vuelva la respuesta, el cliente reintenta. Ahora hay dos pedidos y se ha cobrado dos veces. No es un caso raro: es lo que pasa cada vez que un móvil cambia de wifi a datos a mitad de una petición.
+
+```cpp
+app.idempotency();   // necesita Redis
+```
+
+```
+POST /api/v1/pedidos
+Idempotency-Key: 7f3c...
+```
+
+La primera vez se ejecuta y se guarda el resultado; el reintento con la misma clave devuelve esa respuesta, con `Idempotent-Replay: true`, sin volver a ejecutar nada.
+
+Tres detalles que son la diferencia entre que esto funcione y que haga daño:
+
+- **La misma clave con otro cuerpo es un 422**, no un replay. Si no, un cliente que reusa la clave por descuido recibe la respuesta de un pedido distinto y se queda tan tranquilo.
+- **Dos peticiones simultáneas con la misma clave**: la segunda recibe un 409. Sin eso, la condición de carrera que se venía a cerrar sigue abierta.
+- **Un 5xx suelta la clave.** Si el servidor falló por su cuenta, el cliente tiene que poder reintentar; dejarla tomada convertiría un error transitorio en un bloqueo hasta que venza el TTL.
+
+### Auditoría
+
+"¿Quién cambió el precio de este pedido?" es la pregunta que llega siempre y siempre tarde. Un log de acceso dice que hubo un PUT, no qué cambió.
+
+```cpp
+co_await syrax::audit::record(request, {
+    .action  = "pedido.precio_cambiado",
+    .subject = "pedidos:" + std::to_string(id),
+    .data    = R"({"antes":100,"despues":90})",
+});
+```
+
+El actor sale del token y el request-id de la trazabilidad, así que la entrada queda cosida a la traza sin copiarlos a mano: una línea de auditoría se puede cruzar con el log de acceso de esa misma petición.
+
+**Dentro de la transacción que hace el cambio**, que es la parte que importa:
+
+```cpp
+co_await syrax::db::transaction([&](const syrax::db::Tx& tx) -> syrax::Task<void> {
+    co_await repo::bajarPrecio(id, 90, tx.client());
+    co_await syrax::audit::record(request, {...}, tx.client());
+});
+```
+
+Si el cambio se deshace, la línea también. Una auditoría que registra cosas que no pasaron es peor que no tenerla, porque se confía en ella.
+
+Para leer: `audit::of("pedidos:42")` cuenta la vida de un recurso y `audit::by("ada")` lo que hizo alguien. `audit::install()` crea la tabla; va en bootstrap.
+
+Es **append-only por contrato, no por magia**: aquí no hay nada que actualice ni borre una entrada, y eso es todo lo que puede prometer un framework. Que nadie con acceso a la base la toque se consigue con permisos o un trigger, y eso es del despliegue.
+
+---
+
+## Fuera de la petición
+
+Trabajo que no tiene por qué hacer esperar al cliente.
 
 ### Colas de trabajos
 
@@ -875,92 +1069,6 @@ Si el `COMMIT` falla, el job **tampoco existe**. Con Redis son dos sistemas dist
 
 **Un job se ejecuta al menos una vez, no exactamente una vez.** Si el worker muere a mitad, el job sigue reservado hasta que vence `QUEUE_RETRY_AFTER` y entonces vuelve a la cola. Escríbelos de forma que correr dos veces no haga daño: es la misma regla que en cualquier otra cola.
 
-### Rate limiting
-
-El de siempre cuenta en un mapa del proceso:
-
-```cpp
-app.use(syrax::rateLimit(120, std::chrono::minutes{1}));
-```
-
-Con tres réplicas detrás de un balanceador eso deja pasar 360 por minuto, no 120: cada instancia reparte su cuota entera. Para que el número signifique lo que dice, el contador va en Redis:
-
-```cpp
-app.useAsync(syrax::rateLimitShared(120, std::chrono::seconds{60}));
-```
-
-`useAsync` es una segunda cadena de middleware que **puede esperar**, y corre después de todos los síncronos: lo que se puede rechazar sin salir del proceso no paga una ida y vuelta a la red. Los middleware normales siguen siendo síncronos, que es lo que hay que usar mientras sirva.
-
-Los dos aceptan por quién contar. Por IP de fábrica; una API autenticada casi siempre quiere otra cosa:
-
-```cpp
-syrax::rateLimitShared(1000, std::chrono::seconds{60},
-                       [](const syrax::Request& r) { return r.header("X-Api-Key"); });
-```
-
-Dos decisiones que conviene saber:
-
-- **La ventana es fija**, con su índice dentro de la clave. En el peor caso —una ráfaga al final de una ventana y otra al principio de la siguiente— pasan hasta 2x el límite en un intervalo corto. La alternativa deslizante cuesta una entrada por petición; para proteger de abuso, la fija sobra.
-- **Si Redis no responde, la petición pasa.** Un limitador que tumba la API cuando se cae su almacén convierte una degradación en una caída, y existe para proteger la API, no para ser otro motivo de que no funcione.
-
----
-
-### Paginación
-
-```cpp
-co_return co_await syrax::Query<models::User>()
-              .orderBy(&models::User::id)
-              .paginate(page, perPage);
-```
-
-Devuelve un `Page<T>` —`data`, `total`, `page`, `perPage`, `pages`, `hasMore`— y OpenAPI lo documenta solo, porque sale del mismo tipo. `pages` y `hasMore` se calculan aquí a propósito: son la división entera que en el cliente alguien redondea mal.
-
-Son **dos consultas**, el `count` y el `select`: no hay forma de hacerlo en una sin window functions, que SQLite y los MySQL viejos no tienen. En una tabla grande el caro es el `count(*)`.
-
-Sin `orderBy` el orden lo decide el motor y puede cambiar entre páginas —la fila que estaba en la 1 reaparece en la 2—, pero no se impone: la clave de orden es del que consulta.
-
----
-
-### Serialización parcial
-
-```cpp
-app.partial();
-```
-
-```
-GET /api/v1/users?fields=id,name
-[{"id":1,"name":"Ada"}, ...]
-```
-
-Sobre una página filtra **dentro de `data`** y deja el sobre entero, para que el cliente no pierda `total` ni `page` por pedir dos campos. Un nombre que no existe se ignora; si no existe **ninguno**, es un 400: un `?fields=nombre` donde el campo es `name` devolvería `[{},{},{}]`, y el cliente no tendría forma de saber que se equivocó.
-
-Se para ahí. Lo siguiente que pide todo el mundo es anidar —`fields=user{name,posts{title}}`— y eso ya no es un parámetro, es un lenguaje de consulta con su parser y su problema N+1. Si hace falta eso, hace falta GraphQL.
-
----
-
-### Reintentos seguros
-
-El cliente manda `POST /pedidos`, la red se corta antes de que vuelva la respuesta, el cliente reintenta. Ahora hay dos pedidos y se ha cobrado dos veces. No es un caso raro: es lo que pasa cada vez que un móvil cambia de wifi a datos a mitad de una petición.
-
-```cpp
-app.idempotency();   // necesita Redis
-```
-
-```
-POST /api/v1/pedidos
-Idempotency-Key: 7f3c...
-```
-
-La primera vez se ejecuta y se guarda el resultado; el reintento con la misma clave devuelve esa respuesta, con `Idempotent-Replay: true`, sin volver a ejecutar nada.
-
-Tres detalles que son la diferencia entre que esto funcione y que haga daño:
-
-- **La misma clave con otro cuerpo es un 422**, no un replay. Si no, un cliente que reusa la clave por descuido recibe la respuesta de un pedido distinto y se queda tan tranquilo.
-- **Dos peticiones simultáneas con la misma clave**: la segunda recibe un 409. Sin eso, la condición de carrera que se venía a cerrar sigue abierta.
-- **Un 5xx suelta la clave.** Si el servidor falló por su cuenta, el cliente tiene que poder reintentar; dejarla tomada convertiría un error transitorio en un bloqueo hasta que venza el TTL.
-
----
-
 ### Tareas periódicas
 
 Era no-objetivo mientras no había colas. Lo que cambia con la cola es que ya existe el sitio donde poner el trabajo: el scheduler no ejecuta nada, **encola**, y a partir de ahí la tarea es un job como los demás, con sus reintentos y su registro de fallos.
@@ -981,85 +1089,39 @@ syrax schedule:list     # qué hay programado, sin levantar nada
 
 Tres cosas antes de montarlo: corre **una sola instancia** (dos schedulers encolan cada tarea dos veces, y no hay cerrojo distribuido); una tarea perdida **no se recupera** (si el proceso estaba caído a las 03:00, la siguiente es mañana); y la hora es la **local del proceso**, así que conviene fijarle el `TZ` al contenedor.
 
----
+### Cache
 
-### Permisos finos
-
-Un rol es singular: un actor tiene uno. Los permisos son un conjunto, y viajan en el claim `scope` del token con el formato que define OAuth2 —separados por espacios—, así que un token de Auth0, Keycloak o Cognito ya encaja sin traducir nada.
+Redis, configurado igual que la base y apagado hasta que lo enciendas:
 
 ```cpp
-const auto actor = syrax::actorFrom(request);
+// src/bootstrap/cache.cpp
+void cache() {
+    if (!syrax::envBool("CACHE_ENABLED", false)) return;
 
-if (auto denied = syrax::requireScope(actor, "pedidos:escribir")) co_return *denied;
-```
-
-Ojo a la asimetría con `requireRole`, que no es un descuido: **`requireScope` exige TODOS** los permisos que se le listan, porque listar varios requisitos quiere decir que hacen falta los dos. Cuando la intención es la otra, está `requireAnyScope`, escrito aparte para que la diferencia se lea en el nombre.
-
-Sin comodines: un `pedidos:*` obliga a decidir si cubre `pedidos:escribir:urgente`, y ahí empieza un lenguaje de patrones que no tiene fondo.
-
----
-
-### Soft deletes y timestamps
-
-Se declaran en el modelo, no se deducen de que existan las columnas. Deducirlas sería más corto de escribir y peor de vivir: alguien agrega un `deleted_at` para su propia contabilidad y de pronto DELETE deja de borrar, sin que nada en su código lo diga.
-
-```cpp
-struct Pedido {
-    std::int64_t id;
-    // ...
-    static constexpr auto table       = "pedidos";
-    static constexpr auto timestamps  = true;   // created_at / updated_at
-    static constexpr auto softDeletes = true;   // deleted_at
-};
+    syrax::cache::connect({
+        .host = syrax::env("REDIS_HOST", "127.0.0.1"),
+        .port = static_cast<unsigned short>(syrax::envInt("REDIS_PORT", 6379)),
+    });
+}
 ```
 
 ```cpp
-co_await Query<Pedido>().where(&Pedido::id, "=", id).del();   // marca, no borra
-
-Query<Pedido>().withTrashed()    // también los borrados
-Query<Pedido>().onlyTrashed()    // la papelera
-Query<Pedido>().restore()        // deshacer
-Query<Pedido>().forceDelete()    // borrar de verdad
+co_await cache::put("users.total", "42", std::chrono::minutes{10});
+const auto total = co_await cache::get("users.total");   // optional<string>
+co_await cache::forget("users.total");
 ```
 
-Y en la migración, `table.timestamps()` y `table.softDeletes()` —esta última nullable y **con índice**, porque a partir de ahí toda consulta del modelo lleva `deleted_at IS NULL` y es la columna más consultada de la tabla.
-
-La hora la pone la **base**, no el proceso: con varias instancias los relojes difieren y dos filas creadas en orden pueden quedar con timestamps cruzados.
-
-Si el modelo declara `created_at` como campo, se **lee** pero no se escribe desde el struct: un objeto recién construido lo tiene vacío y lo pisaría con basura.
-
----
-
-### Auditoría
-
-"¿Quién cambió el precio de este pedido?" es la pregunta que llega siempre y siempre tarde. Un log de acceso dice que hubo un PUT, no qué cambió.
+Y el patrón de siempre, que además serializa por ti:
 
 ```cpp
-co_await syrax::audit::record(request, {
-    .action  = "pedido.precio_cambiado",
-    .subject = "pedidos:" + std::to_string(id),
-    .data    = R"({"antes":100,"despues":90})",
-});
+co_return co_await cache::remember<std::vector<User>>(
+    "users.activos", std::chrono::minutes{10},
+    [] { return repo::activos(); });
 ```
 
-El actor sale del token y el request-id de la trazabilidad, así que la entrada queda cosida a la traza sin copiarlos a mano: una línea de auditoría se puede cruzar con el log de acceso de esa misma petición.
+El valor viaja como JSON, así que sirve para cualquier struct que el resto del framework ya sabe serializar. Si el JSON guardado ya no encaja con el tipo —cambiaste el struct— se trata como un fallo de cache: se recalcula y se pisa, en vez de reventar.
 
-**Dentro de la transacción que hace el cambio**, que es la parte que importa:
-
-```cpp
-co_await syrax::db::transaction([&](const syrax::db::Tx& tx) -> syrax::Task<void> {
-    co_await repo::bajarPrecio(id, 90, tx.client());
-    co_await syrax::audit::record(request, {...}, tx.client());
-});
-```
-
-Si el cambio se deshace, la línea también. Una auditoría que registra cosas que no pasaron es peor que no tenerla, porque se confía en ella.
-
-Para leer: `audit::of("pedidos:42")` cuenta la vida de un recurso y `audit::by("ada")` lo que hizo alguien. `audit::install()` crea la tabla; va en bootstrap.
-
-Es **append-only por contrato, no por magia**: aquí no hay nada que actualice ni borre una entrada, y eso es todo lo que puede prometer un framework. Que nadie con acceso a la base la toque se consigue con permisos o un trigger, y eso es del despliegue.
-
----
+`cache::client()` da el `RedisClient` de Drogon para todo lo demás. Pedirlo antes de `app.run()` lanza con un mensaje en vez de un segfault: Drogon crea sus clientes al arrancar.
 
 ### Llamar a otra API
 
@@ -1084,207 +1146,80 @@ Se planta ahí: **sin circuit breaker y sin descubrimiento de servicios**. El pr
 
 ---
 
-### Tokens de otro proveedor
+## Operación
 
-La mitad finita y útil de OAuth2/OIDC: Auth0, Keycloak, Cognito y Entra firman con RS256 y publican sus claves públicas; lo único que tiene que hacer tu API es bajarlas y comprobar la firma.
+Lo que hace falta el día que esto corre en un servidor y no en tu portátil.
+
+### Configuración
+
+La configuración de un proyecto vive en `src/bootstrap/`, un archivo por cosa que se configura, y son funciones C++ normales — no un formato que haya que aprender:
+
+```
+src/bootstrap/
+├── app.cpp         junta todo: base de la API, y llama a las de abajo
+├── config.cpp      toda la configuración, tipada y validada al arrancar
+├── schedule.cpp    las tareas periódicas
+├── database.cpp    la conexión a la base
+├── cache.cpp       el Redis, si lo enciendes
+├── queue.cpp       el driver de la cola y los jobs registrados
+├── middleware.cpp  CORS, rate limit y cabeceras de seguridad
+└── errors.cpp      qué excepciones merecen otro estado
+```
+
+`config.cpp` va primero y el resto lee de él: así un `DB_POOL=cuatro` falla al
+arrancar con el nombre de la variable, y no en la primera consulta.
 
 ```cpp
-app.useAsync(syrax::auth::jwks("https://tu-tenant.auth0.com/.well-known/jwks.json",
-                               {.issuer = "https://tu-tenant.auth0.com/",
-                                .audience = "https://api.tuempresa.com"}));
+// src/bootstrap/middleware.cpp
+void middleware(syrax::App& app) {
+    app.cors({
+        .origins     = {syrax::env("CORS_ORIGINS", "*")},
+        .credentials = syrax::envBool("CORS_CREDENTIALS", false),
+    });
+
+    app.useOnResponse(syrax::securityHeaders());
+
+    app.use(syrax::rateLimit(syrax::envInt("RATE_LIMIT", 120), std::chrono::minutes{1}));
+}
 ```
 
-A partir de ahí el token es un token: `auth.sub`, `auth.role` y `auth.scope` quedan en la petición igual que con `bearer()`, y `requireScope()` funciona sobre ellos sin traducir nada.
-
-Tres cosas que separan verificar de fingir que se verifica:
-
-- **El algoritmo se exige, no se lee del token.** Un JWT dice en su propia cabecera con qué se firmó, y obedecerlo es el agujero clásico: `alg=none`, o `alg=HS256` usando la clave **pública** como secreto compartido. Aquí sólo entra RS256, y hay un test por cada uno de esos dos ataques.
-- **Un `kid` desconocido fuerza una recarga, pero con freno.** Los proveedores rotan claves y sin recarga el día de la rotación no entra nadie; recargando en cada fallo, cualquiera tumba tu API mandando tokens con `kid` inventado.
-- **`issuer` y `audience` se comprueban.** Un token de otro cliente del mismo proveedor está perfectamente firmado; lo que dice que no es para ti es el `aud`.
-
-*Ser* el proveedor no entra — discovery, PKCE, refresh, cuatro flujos y sus modos de fallo — y el motivo está en los no-objetivos.
-
----
-
-### Archivos subidos
+Los tres middlewares vienen puestos en todo proyecto nuevo. Antes existían y no los usaba nadie, porque no se veían desde ningún sitio.
 
 ```cpp
-const syrax::Uploads archivos{request};
-
-const auto fallos = archivos.check({
-    syrax::upload("avatar").required().maxSize(2 * 1024 * 1024).image(),
-    syrax::upload("cv").maxSize(5 * 1024 * 1024).extensions({"pdf"}).pdf(),
-});
-if (!fallos.empty()) co_return syrax::Error{422, "validation failed", "", "", fallos};
+// src/bootstrap/database.cpp
+void database() {
+    syrax::db::connect({
+        .engine      = syrax::env("DB_ENGINE", "postgres"),
+        .host        = syrax::env("DB_HOST", "127.0.0.1"),
+        .port        = static_cast<unsigned short>(syrax::envInt("DB_PORT", 0)),
+        .database    = syrax::env("DB_NAME", "api"),
+        .username    = syrax::env("DB_USER", "postgres"),
+        .password    = syrax::env("DB_PASSWORD", "postgres"),
+        .connections = static_cast<std::size_t>(syrax::envInt("DB_POOL", 4)),
+    });
+}
 ```
 
-Devuelve `FieldError`, el mismo tipo que `validate()`, así que el 422 sale por el camino de siempre.
+El valor por defecto está **al lado** de la clave, y se ve de un vistazo qué lee la app del entorno. `syrax::env`, `envInt` y `envBool` leen el proceso con respaldo al `.env`; lo que ya existe en el entorno gana siempre, para que el despliegue pueda pisar el archivo. Un valor mal escrito (`DB_PORT=cinco`) avisa por `stderr` en vez de caer en silencio al default.
 
-**No hay filtro por tipo MIME, y es deliberado.** El tipo que viaja en el multipart lo declara el cliente: subir un `.php` diciendo que es `image/png` es el ataque de manual, así que un `mimes({"image/png"})` da una sensación de seguridad que no corresponde a nada. Lo que sí significa algo es `image()` y `pdf()`, que miran los **primeros bytes** del archivo — lo único que no se puede falsificar sin falsificar el contenido.
+Llamar varias veces a `connect()` con `name` distinto da varias conexiones; `db::client("informes")` pide una por nombre.
 
-**Guardar no entra.** Es elegir dónde, cómo se nombra para que dos subidas no se pisen, quién lo borra y qué pasa cuando el disco se llena. Eso es storage, y storage no es finito. El contenido está en `bytes`.
-
----
-
-### Métricas
-
-```cpp
-app.metrics();
-```
-
-```
-syrax_requests_total 1428
-syrax_requests_failed_total 3
-syrax_request_duration_seconds_sum 9.412
-syrax_requests_in_flight 2
-```
-
-Con eso salen las tres gráficas que de verdad se miran: cuánto tráfico hay, qué porcentaje falla y cuánto se tarda de media. Un 4xx **no** cuenta como fallo: un 404 es el cliente pidiendo mal, y contarlo hace que la gráfica de errores suba cuando lo que pasa es que alguien escanea rutas.
-
-Y se planta ahí. Lo siguiente que se pide siempre es partirlo por ruta, y eso no es un contador más: `/users/42` genera una serie por usuario, y el primero que pase un bot tumba el Prometheus, no la API. Cuando hagan falta histogramas y etiquetas, lo que hace falta es `prometheus-cpp`.
-
----
-
-### Multi-tenancy
-
-```cpp
-struct Factura {
-    std::int64_t id;
-    std::string  tenant_id;
-    // ...
-    static constexpr auto table  = "facturas";
-    static constexpr auto tenant = true;
-};
-
-co_await syrax::Query<Factura>().forTenant(actor.tenant).get();
-```
-
-**Olvidar el `forTenant` lanza.** Es la decisión central: el fallo que esta feature no se puede permitir es servirle a un cliente los datos de otro, y con el tenant pasándose a mano basta olvidarlo una vez en un repositorio para que pase, en silencio y en producción. Un error ruidoso en la primera prueba convierte un fallo de seguridad en uno de programación normal.
-
-Se pasa explícito y no por un contexto implícito porque **con corrutinas no hay contexto por petición fiable**: un `co_await` reanuda en otro hilo, y un `thread_local` ahí no da un error, da los datos del tenant equivocado de vez en cuando. Es la misma trampa que documenta el apartado de inyección de dependencias.
-
-Sólo el modelo **por fila**: el de esquema y el de base por tenant son decisiones que no se pueden desandar, y un framework no debería elegirlas por ti.
-
-**El CLI lo genera entero:**
+**El puerto** se resuelve de más a menos prioridad:
 
 ```bash
-syrax make:api Factura --tenant
+./mi-api 3000        # 1. argumento explícito
+APP_PORT=3000        # 2. entorno, o el .env
+                     # 3. 8080
 ```
 
-Eso escribe el modelo con el marcador y el campo, la migración con `table.tenantId()` —indexada, porque toda consulta del modelo la filtra— y el `tenant` enhebrado por **todas** las firmas, del controlador al repositorio, hasta el `.forTenant()`.
-
-Es verboso y es a propósito: como el framework no deja ejecutar una consulta sin el tenant, o viaja por la firma o no compila. Un parámetro que se ve en cada capa es mejor que un contexto implícito que con corrutinas no se puede tener.
-
-Lo único que queda por decidir es de dónde sale, y el generador deja la función escrita y marcada en un solo sitio:
+**La base de la API** se declara una vez, en `bootstrap/app.cpp`, y las rutas cuelgan de ahí:
 
 ```cpp
-// CAMBIA ESTO. Lo normal es un claim del token, pero también puede venir
-// del subdominio o de una cabecera.
-std::string tenantOf(const Request& request) {
-    return actorFrom(request).id;
-}
+app.base(syrax::env("API_BASE", "/api/v1"));   // en bootstrap
+routes::v1::register_(app.api());              // en routes/routes.cpp
 ```
 
----
-
-### Middleware, autenticación y políticas
-
-Un middleware es una función que recibe la petición y devuelve un `Error` para cortar, o nada para dejar pasar. Sin clases, sin registro global:
-
-```cpp
-app.useOnResponse(securityHeaders());                    // a toda respuesta
-app.use(rateLimit(100, std::chrono::minutes{1}));        // a toda petición
-app.use("/api/v1/admin", auth::bearer(secreto));         // solo bajo ese prefijo
-app.cors({.origins = {"https://mi-front.com"}});
-```
-
-También hay `requireApiKey(clave)`, que compara en tiempo constante.
-
-**JWT y contraseñas** (HS256 y PBKDF2-SHA256 sobre OpenSSL):
-
-```cpp
-const auto token  = auth::sign({.sub = "42", .role = "admin"}, secreto);
-const auto claims = auth::verify(token, secreto);        // optional<Claims>
-
-const auto hash = auth::hashPassword("secreto");         // 600 000 iteraciones
-const bool ok   = auth::verifyPassword("secreto", hash);
-```
-
-`auth::bearer()` verifica el token y deja el sujeto y el rol en la petición. De ahí sale el actor:
-
-```cpp
-// http/controllers/Post/PostController.cpp
-Task<Result<PostResource>> update(Request req, std::int64_t id, UpdatePost body) {
-    const auto actor = actorFrom(req);
-
-    if (auto denied = requireRole(actor, "admin", "editor")) co_return *denied;
-    // ...
-}
-```
-
-`Request` es opcional y va primero; el body, último. Un controlador que no necesita la petición cruda no la declara.
-
-Una **política** es solo una función que devuelve `optional<Error>`. No hay registro ni resolución por nombre:
-
-```cpp
-namespace policies {
-std::optional<Error> update(const Actor& actor, const Post& post) {
-    if (actor.is("admin"))         return std::nullopt;
-    if (post.authorId == actor.id) return std::nullopt;
-    return Forbidden("no puedes editar este post");
-}
-}
-
-if (auto denied = policies::update(actor, post)) co_return *denied;
-```
-
-`requireRole` distingue **401** (no autenticado) de **403** (rol insuficiente); confundirlos le dice a un atacante si una credencial es válida. `allowIf` y `denyIf` cubren las condiciones sueltas.
-
-Un sistema completo de roles y permisos es una aplicación, no un framework: esto es lo mínimo para escribirlo sin pelearse.
-
-### WebSockets
-
-```cpp
-syrax::Room sala;
-
-app.ws("/chat", {
-    .onOpen    = [&](const Socket& s) { sala.join(s); },
-    .onMessage = [&](const Socket&, std::string_view text) { sala.broadcast(text); },
-    .onClose   = [&](const Socket& s) { sala.leave(s); },
-});
-```
-
-`Room` es un grupo de conexiones al que se emite de una vez, con su sincronización resuelta: Drogon reparte las conexiones entre varios event loops, así que sin esto cada proyecto tendría que rehacer el registro y su mutex.
-
-`Socket` trae `send`, `sendJson` (el mismo struct que sirve un endpoint REST sirve un mensaje de socket), `close`, `ip` y `set`/`get` para estado por conexión — lo típico es guardar ahí el usuario que quedó autenticado en `onOpen`.
-
-Los middlewares de Syrax **no** corren sobre sockets: operan sobre respuestas HTTP, y un socket deja de tenerlas después del handshake. La autenticación va dentro de `onOpen`.
-
----
-
-### Salud
-
-`app.health()` registra un `GET /health` que le pregunta a cada base y cada Redis registrados —un `SELECT 1` y un `PING`—, y contesta **200 si responden y 503 si no**, con el desglose en el cuerpo:
-
-```json
-{"status":"down","checks":[
-  {"name":"database","status":"ok","detail":"","ms":1},
-  {"name":"cache","status":"down","detail":"Connection refused","ms":2}]}
-```
-
-Un 200 fijo no comprueba nada: dice que el proceso está vivo, que es lo que el orquestador ya sabe porque tiene el pid. Con él, un contenedor cuya base está caída se reporta sano y el balanceador le sigue mandando tráfico. Lo que hace útil al healthcheck es justo lo contrario.
-
-Para lo que el framework no puede saber:
-
-```cpp
-syrax::health::probe("s3", []() -> syrax::Task<std::string> {
-    co_return co_await alcanzable() ? "" : "no responde";   // vacio = ok
-});
-```
-
-Una comprobación que lanza es un `down` con el motivo, no un 500: el endpoint no se cae cuando se cae una dependencia.
-
----
+Cambiar `API_BASE` mueve la API entera sin tocar una sola ruta. Lo que no es de la API —un `/health`, los estáticos— se sigue registrando con su ruta completa: la base no es un prefijo global.
 
 ### Configuración tipada
 
@@ -1319,17 +1254,100 @@ Todos los problemas juntos, no uno por arranque. Y es el mismo `rules()` que ya 
 
 Esto **no sustituye a `env()`**. Con cuatro variables el tipo sobra; empieza a pagar cuando son veinte y alguna importa.
 
----
+### Trazabilidad
 
-### ETag y 304
+Cada petición recibe un identificador corto, y con él se puede encontrar *esa* petición entre todas las demás. Va puesto de fábrica: no hay nada que encender.
 
-```cpp
-app.etag();
+```
+201  POST   /api/v1/users                          12.4ms  7dw1ubha8o09
+404  GET    /api/v1/users/9999                      0.8ms  k2p0zx4mq1te
+500  POST   /api/v1/orders                         31.7ms  9a8sbd03nfl2
 ```
 
-Cada GET de éxito sale con un `ETag` calculado sobre su cuerpo, y una petición que lo traiga en `If-None-Match` recibe un **304 sin cuerpo**. Para un recurso que cambia poco y se pide mucho, eso es la diferencia entre mandar el JSON entero cada vez y mandar una línea de cabeceras.
+Eso es lo que ves en la terminal mientras desarrollas. Detrás de un pipe —un contenedor, el CI, un recolector de logs— la misma información sale como una línea JSON por evento, porque es lo que esas herramientas saben leer:
 
-Ahorra red, no trabajo: el cuerpo se genera igual para poder hashearlo. Ahorrarse también el trabajo obliga a saber cuándo cambió el recurso, y eso solo lo sabe la aplicación.
+```json
+{"ts":"2026-09-16T04:42:27.380Z","level":"info","msg":"request","method":"POST","path":"/users","status":"201","ms":"12.4","ip":"127.0.0.1","request_id":"7dw1ubha8o09"}
+```
+
+El id viaja en la cabecera `X-Request-Id` de la respuesta, así que quien reporta un fallo tiene algo que citar. Y si la petición **ya traía** una —porque la mandó un gateway u otro servicio—, se respeta: la traza cruza el salto entera.
+
+Para tus propios eventos:
+
+```cpp
+syrax::log::info("pedido confirmado", {{"pedido", std::to_string(id)},
+                                       {"request_id", syrax::log::requestId(request)}});
+```
+
+| Variable | Qué hace |
+|---|---|
+| `LOG_FORMAT` | `json` o `text`. Por defecto: texto si hay terminal, JSON si no. |
+| `LOG_LEVEL` | `debug`, `info`, `warn`, `error`. Por defecto `info`. |
+| `LOG_ACCESS` | `0` apaga la línea por petición. |
+
+### Salud
+
+`app.health()` registra un `GET /health` que le pregunta a cada base y cada Redis registrados —un `SELECT 1` y un `PING`—, y contesta **200 si responden y 503 si no**, con el desglose en el cuerpo:
+
+```json
+{"status":"down","checks":[
+  {"name":"database","status":"ok","detail":"","ms":1},
+  {"name":"cache","status":"down","detail":"Connection refused","ms":2}]}
+```
+
+Un 200 fijo no comprueba nada: dice que el proceso está vivo, que es lo que el orquestador ya sabe porque tiene el pid. Con él, un contenedor cuya base está caída se reporta sano y el balanceador le sigue mandando tráfico. Lo que hace útil al healthcheck es justo lo contrario.
+
+Para lo que el framework no puede saber:
+
+```cpp
+syrax::health::probe("s3", []() -> syrax::Task<std::string> {
+    co_return co_await alcanzable() ? "" : "no responde";   // vacio = ok
+});
+```
+
+Una comprobación que lanza es un `down` con el motivo, no un 500: el endpoint no se cae cuando se cae una dependencia.
+
+### Métricas
+
+```cpp
+app.metrics();
+```
+
+```
+syrax_requests_total 1428
+syrax_requests_failed_total 3
+syrax_request_duration_seconds_sum 9.412
+syrax_requests_in_flight 2
+```
+
+Con eso salen las tres gráficas que de verdad se miran: cuánto tráfico hay, qué porcentaje falla y cuánto se tarda de media. Un 4xx **no** cuenta como fallo: un 404 es el cliente pidiendo mal, y contarlo hace que la gráfica de errores suba cuando lo que pasa es que alguien escanea rutas.
+
+Y se planta ahí. Lo siguiente que se pide siempre es partirlo por ruta, y eso no es un contador más: `/users/42` genera una serie por usuario, y el primero que pase un bot tumba el Prometheus, no la API. Cuando hagan falta histogramas y etiquetas, lo que hace falta es `prometheus-cpp`.
+
+### OpenAPI automático
+
+`/openapi.json` y `/docs` con Swagger UI, generados de las rutas registradas. **Los esquemas salen de los mismos tipos que usan los controladores**, así que la documentación no puede desincronizarse del código: no hay anotaciones que mantener.
+
+```cpp
+app.docs("Mi API", "2.0.0");   // titulo y version
+app.withoutDocs();             // apagarlo en produccion
+```
+
+Eso incluye los path params: un controlador que declara `show(std::int64_t id)` documenta `{id}` como `integer`, no como `string`. El tipo lo pone la firma, igual que el resto.
+
+Y el documento se puede sacar sin levantar el servidor, para volcarlo en CI o generar clientes:
+
+```cpp
+const auto spec = app.openApi();   // lo mismo que sirve /openapi.json
+```
+
+### Recarga al guardar
+
+`syrax serve` se queda de padre del servidor y vigila `src/` y `database/`. Guardas un `.cpp` y recompila y vuelve a levantar solo; `r` lo fuerza a mano y `q` sale.
+
+**Si no compila, el servidor anterior sigue vivo.** Quedarte sin servidor justo cuando acabas de romper el código es lo contrario de lo que quieres: verás el error del compilador y el binario de antes seguirá respondiendo hasta que arregles.
+
+Sin terminal interactiva —un contenedor, CI, una tubería— no hay teclado que escuchar y se comporta como siempre. `--no-watch` apaga la vigilancia.
 
 ---
 
@@ -1393,12 +1411,6 @@ urlFor("users.show", 42)   // "/api/v1/users/42"
 Sirve para la cabecera `Location` de un 201, o para enlazar un recurso desde otro. Un alias que nadie registró devuelve vacío, no una URL inventada.
 
 **Por qué existe `http/`:** marca un límite real. Si mañana expones la misma lógica por gRPC, esa carpeta se tira entera y `services/`, `repositories/` y `models/` siguen sirviendo sin tocarse.
-
-**Por qué `models/` y `resources/` están separados:** `User` tiene `passwordHash` y `UserResource` no. Un campo privado no puede filtrarse por accidente porque el tipo que se serializa simplemente no lo tiene.
-
-Ninguno de esos nombres los conoce el framework: son archivos C++ normales. Renómbralos o bórralos.
-
----
 
 ### Tests en tu proyecto
 
@@ -1490,14 +1502,14 @@ Agregar un archivo a `tests/` no obliga a tocar ningún CMake, y `database/facto
 
 ---
 
-## Tests
+## Tests y CI
 
 ```bash
 syrax test                     # en el repo de Syrax
 ctest --test-dir build         # equivalente
 ```
 
-137 casos cubriendo el generador de DDL en ambos dialectos, `ALTER TABLE` ejecutado contra SQLite real, el mapeo de filas a structs, el query builder contra SQLite real —SQL generado, `save`/`remove`, `update` masivo, paginación, enums, el `IN ()` vacío y que agrupar con `whereGroup` cambia qué filas vuelven—, las reglas de validación y su anotación del JSON Schema, la generación de OpenAPI, JWT y hashing de contraseñas, middlewares y políticas, la integración HTTP completa (ruteo, binding de body, 422 con detalle por campo, path params, corrutinas, el 404 y el 500 en JSON) y los WebSockets hablando el protocolo a mano contra el servidor real.
+355 casos cubriendo el generador de DDL en ambos dialectos, `ALTER TABLE` ejecutado contra SQLite real, el mapeo de filas a structs, el query builder contra SQLite real —SQL generado, `save`/`remove`, `update` masivo, paginación, enums, el `IN ()` vacío y que agrupar con `whereGroup` cambia qué filas vuelven—, las reglas de validación y su anotación del JSON Schema, la generación de OpenAPI, JWT y hashing de contraseñas, middlewares y políticas, la integración HTTP completa (ruteo, binding de body, 422 con detalle por campo, path params, corrutinas, el 404 y el 500 en JSON) y los WebSockets hablando el protocolo a mano contra el servidor real.
 
 CI en GitHub Actions, en cada push y PR:
 
@@ -1526,6 +1538,8 @@ Las digo aquí en vez de que las descubras tú:
 - **`ccache` solo acierta si el directorio de build es el mismo.** FetchContent deja Drogon *dentro* de `build/`, así que sus rutas de include forman parte de cada compilación: dos directorios distintos son dos entradas distintas y la caché no sirve. Borrar y rehacer `build/` en el mismo sitio sí acierta al 100%. Con `CCACHE_BASEDIR` se puede sortear, pero eso es configuración tuya, no del proyecto.
 - **Pre-1.0.** La API puede cambiar sin aviso.
 
+---
+
 ## No-objetivos
 
 ```
@@ -1548,7 +1562,7 @@ Syrax compone; no reemplaza. Si tu proyecto necesita algo de esto, tómalo de un
 ┌──────────────────────────────────────────────────┐
 │  Tu aplicación                                   │
 ├──────────────────────────────────────────────────┤
-│  SYRAX  ← ~4200 lineas de cabeceras              │
+│  SYRAX  ← ~9250 lineas en 29 cabeceras           │
 │                                                  │
 │  Ruteo con deducción de tipos desde la firma     │
 │  Binding request → struct, y reglas por campo    │

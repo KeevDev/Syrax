@@ -191,6 +191,27 @@ public:
                           "aplicacion antes."};
         }
 
+        // Un cliente POR PETICION, y no uno guardado en el objeto. Parece un
+        // despilfarro -un handshake por llamada- y por eso conviene decir que
+        // la alternativa es peor.
+        //
+        // Un HttpClient de Drogon mantiene UNA sola conexion persistente, y el
+        // pipelining viene apagado de fabrica. Guardarlo como miembro no seria
+        // "el mismo cliente con keep-alive": seria un unico socket para toda la
+        // aplicacion, con las peticiones concurrentes apiladas en su cola
+        // interna y saliendo de una en una.
+        //
+        // Y el temporizador del timeout arranca AL ENCOLAR, no al enviar. Con
+        // cincuenta llamadas a la vez, la ultima espera detras de cuarenta y
+        // nueve con sus diez segundos ya corriendo: bajo carga empiezan a
+        // caducar peticiones que nunca llegaron a salir. Peor todavia, ese
+        // timeout no distingue "no salio" de "salio y no contesto", que es
+        // justo la ambigüedad que el resto de este archivo existe para evitar.
+        //
+        // El handshake es un coste visible, constante y medible. Aquello es un
+        // acantilado de latencia que en desarrollo -una peticion cada vez- no
+        // se ve. Cuando el handshake sea de verdad el cuello de botella, lo que
+        // toca es un pool de N clientes, no compartir uno.
         auto client = drogon::HttpClient::newHttpClient(base_);
 
         const int intentos =

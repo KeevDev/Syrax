@@ -5,6 +5,7 @@
 #include <glaze/glaze.hpp>
 
 #include <syrax/db.hpp>
+#include <syrax/relations.hpp>
 #include <syrax/traits.hpp>
 
 #include <cstddef>
@@ -214,6 +215,10 @@ struct Page {
 template <typename T, typename U>
 class Join;
 
+// Una consulta que ademas se trae los hijos. Se construye con Query<T>::with().
+template <typename T, typename U, typename KU, typename KT>
+class With;
+
 // Construye SELECT / UPDATE / DELETE / COUNT sobre un struct plano.
 //
 //   auto adultos = co_await Query<User>()
@@ -222,12 +227,16 @@ class Join;
 //       .limit(10)
 //       .get();
 //
-// Para unir con otra tabla, join() devuelve un Join<T, U> -esta debajo- que
-// trabaja sobre las dos. Lo que sigue sin haber son RELACIONES: nada de lazy
-// loading ni de un vector de hijos dentro del padre. Un join devuelve filas
-// planas, como SQL; anidarlas exige agrupar N filas en un objeto, y ahi
-// empieza el ORM. Para eso, dos consultas y un mapa, o SQL a mano con
-// db::query, que sigue disponible.
+// Para unir con otra tabla, join() devuelve un Join<T, U> que trabaja sobre las
+// dos y devuelve filas planas. Para traerse los hijos anidados -un User con su
+// vector<Post> dentro-, with() devuelve un With<...> que hace DOS consultas y
+// los agrupa.
+//
+// Lo que sigue sin haber es LAZY LOADING, y es la unica linea que importa: un
+// post.author() que consulta al navegarlo esconde un numero de consultas que
+// depende de los datos, y eso es el N+1. Aqui el numero es siempre el mismo,
+// se vea o no la segunda consulta. Tampoco hay identity map ni cascadas: eso
+// ultimo lo hace mejor un ON DELETE CASCADE en la migracion.
 template <typename T>
 class Query {
 public:
@@ -303,6 +312,47 @@ public:
     template <typename U, typename CT, typename MT, typename CU, typename MU>
     Join<T, U> leftJoin(MT CT::*local, MU CU::*foreign) const {
         return startJoin<U>(Join<T, U>::Kind::Left, local, foreign);
+    }
+
+    // --- traerse los hijos ---
+
+    // Anade una segunda consulta que trae los hijos y los agrupa bajo su
+    // padre. A diferencia de join(), esto puede ir en cualquier sitio de la
+    // cadena: son dos consultas separadas, asi que no hay ninguna columna que
+    // calificar.
+    //
+    //   Query<User>().where(&User::age, ">", 18)
+    //                .with<Post>(&Post::author_id, &User::id)
+    //                .get<UserConPosts>();
+    template <typename U, typename CU, typename MU, typename CT, typename MT>
+    With<T, U, MU, MT> with(MU CU::*childKey, MT CT::*parentKey) const {
+        static_assert(std::is_same_v<CU, U>,
+                      "syrax: la clave foranea tiene que ser del modelo hijo.");
+        static_assert(std::is_same_v<CT, T>,
+                      "syrax: la clave del padre tiene que ser del modelo de esta consulta.");
+
+        return With<T, U, MU, MT>{*this, childKey, parentKey};
+    }
+
+    // Lo mismo, con las claves sacadas del modelo. Ver `relations` en
+    // relations.hpp: se declaran una vez, donde se declara la tabla.
+    //
+    //   Query<User>().with<Post>().get<UserConPosts>();
+    template <typename U>
+    auto with() const {
+        static_assert(detail::HasRelations<T>,
+                      "syrax: para llamar a with<U>() sin claves, el modelo tiene que "
+                      "declararlas: `static constexpr auto relations = syrax::relate("
+                      "syrax::hasMany(&Hijo::padre_id, &Padre::id));`. O pasalas aqui.");
+
+        constexpr auto at = detail::indexOfRelation<T, U>(T::relations);
+        static_assert(at != detail::kNoField,
+                      "syrax: el modelo no declara UNA relacion hacia ese tipo. Si no hay "
+                      "ninguna, agregala; si hay dos hacia el mismo modelo -autor y revisor, "
+                      "los dos User-, cual se usa no se puede adivinar: pasa las claves.");
+
+        const auto& relation = std::get<at>(T::relations);
+        return with<U>(relation.childKey, relation.parentKey);
     }
 
     // --- orden y paginacion ---
@@ -501,6 +551,11 @@ public:
     std::string toSql() const { return select(); }
 
     std::string toUpdateSql() const { return updatePlan().first; }
+
+    // El cliente TAL CUAL, sin resolver al de por defecto: una consulta hija
+    // tiene que heredar el de su padre -que puede ser el de una transaccion- y
+    // resolverlo aqui la sacaria de ella.
+    drogon::orm::DbClientPtr clientOrNull() const { return client_; }
 
 private:
     drogon::orm::DbClientPtr target() const { return client_ ? client_ : db::client(); }
@@ -712,6 +767,119 @@ private:
     std::vector<Assignment>          sets_;
     std::size_t                      paramBase_ = 0;
     Trashed                          trashed_   = Trashed::Without;
+};
+
+// ----------------------------------------------------------------- With
+
+// Una consulta que ademas se trae los hijos, en DOS consultas fijas.
+//
+//   struct UserConPosts {
+//       User              user;
+//       std::vector<Post> posts;
+//   };
+//
+//   co_await Query<User>()
+//       .where(&User::age, ">", 18)
+//       .with<Post>(&Post::author_id, &User::id)
+//       .get<UserConPosts>();
+//
+//   SELECT ... FROM "users" WHERE "age" > $1
+//   SELECT ... FROM "posts" WHERE "author_id" IN ($1, $2, $3)
+//
+// **Esto no es lazy loading, y la diferencia es toda la diferencia.** El lazy
+// esconde un numero DESCONOCIDO de consultas: una por objeto, dentro de un
+// bucle que no lo dice, y el N+1 aparece en produccion cuando la tabla crece.
+// Esto esconde exactamente una, siempre, haya tres filas o tres mil. Esconder
+// un numero fijo es empaquetar; esconder uno que depende de los datos es la
+// trampa.
+//
+// **Y aqui paginate() SI existe**, al reves que en un join: se pagina la tabla
+// base -donde `total` y `pages` significan lo que dicen- y los hijos se traen
+// solo de esa pagina. Es el orden correcto, y es el que un join no permite.
+//
+// Un padre sin hijos sale con el vector vacio: los padres son los que trajiste
+// y esto no descarta ninguno.
+//
+// Un solo nivel. Anidar dos -user -> posts -> comments- ya no es una relacion,
+// es un plan de consultas con su orden y sus claves intermedias.
+template <typename T, typename U, typename KU, typename KT>
+class With {
+public:
+    With(Query<T> base, KU U::*childKey, KT T::*parentKey)
+        : base_{std::move(base)}, childKey_{childKey}, parentKey_{parentKey} {}
+
+    // Ata las dos consultas al mismo tenant. Una consulta pertenece a un
+    // cliente, no a dos.
+    With& forTenant(std::string id) {
+        static_assert(detail::Tenant<T> || detail::Tenant<U>,
+                      "syrax: forTenant() necesita que alguno de los dos modelos declare "
+                      "`static constexpr auto tenant = true;`.");
+        if constexpr (detail::Tenant<T>) base_.forTenant(id);
+        tenant_ = std::move(id);
+        return *this;
+    }
+
+    template <typename R>
+    drogon::Task<std::vector<R>> get() const {
+        const auto parents = co_await base_.get();
+        co_return co_await hydrate<R>(parents);
+    }
+
+    template <typename R>
+    drogon::Task<std::optional<R>> first() const {
+        Query<T> uno{base_};
+        uno.limit(1);
+
+        const auto parents = co_await uno.get();
+        if (parents.empty()) co_return std::nullopt;
+
+        const auto filas = co_await hydrate<R>(parents);
+        co_return filas.front();
+    }
+
+    // Se pagina la tabla BASE, que es donde total y pages significan algo, y
+    // los hijos se traen solo de esa pagina. Siguen siendo dos consultas mas
+    // la del count.
+    template <typename R>
+    drogon::Task<Page<R>> paginate(std::int64_t page = 1, std::int64_t perPage = 15) const {
+        const auto base = co_await base_.paginate(page, perPage);
+
+        co_return Page<R>{
+            .data    = co_await hydrate<R>(base.data),
+            .total   = base.total,
+            .page    = base.page,
+            .perPage = base.perPage,
+            .pages   = base.pages,
+            .hasMore = base.hasMore,
+        };
+    }
+
+private:
+    // La segunda consulta y el agrupado. Se separa porque get, first y
+    // paginate solo se diferencian en como consiguen los padres.
+    template <typename R>
+    drogon::Task<std::vector<R>> hydrate(const std::vector<T>& parents) const {
+        // Sin padres no hay claves que buscar, y un IN vacio seria una ida a la
+        // base para no traer nada.
+        if (parents.empty()) co_return std::vector<R>{};
+
+        std::vector<KT> keys;
+        keys.reserve(parents.size());
+        for (const auto& parent : parents) keys.push_back(parent.*parentKey_);
+
+        Query<U> hijos{base_.clientOrNull()};
+        hijos.whereIn(childKey_, std::move(keys));
+        if constexpr (detail::Tenant<U>) {
+            if (tenant_) hijos.forTenant(*tenant_);
+        }
+
+        co_return groupInto<R>(parents, co_await hijos.get(), parentKey_, childKey_);
+    }
+
+    Query<T>                   base_;
+    KU U::*                    childKey_;
+    KT T::*                    parentKey_;
+    std::optional<std::string> tenant_;
 };
 
 // ----------------------------------------------------------------- Join

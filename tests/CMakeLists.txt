@@ -18,6 +18,7 @@ add_executable(syrax_tests
     validation_test.cpp
     query_test.cpp
     join_test.cpp
+    relations_test.cpp
     envport_test.cpp
     config_test.cpp
     config_typed_test.cpp

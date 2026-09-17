@@ -1712,6 +1712,8 @@ Syrax compone; no reemplaza. Si tu proyecto necesita algo de esto, tómalo de un
 
 Syrax escribe muy poco código. Las partes difíciles ya existen, son excelentes, y las mantiene alguien más.
 
+Qué se usa exactamente de Drogon, y qué haría falta para no depender de él, está medido en [docs/SIN-DROGON.md](docs/SIN-DROGON.md).
+
 El pegamento entre ellas no existía. Eso es Syrax.
 
 ---

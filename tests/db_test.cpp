@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -36,6 +37,13 @@ struct WithOptional {
 };
 
 // Crea una base sqlite temporal y la borra al salir del scope.
+// Los clientes que se quedan vivos hasta que muere el proceso. Ver la nota del
+// destructor de cada fixture.
+inline std::vector<drogon::orm::DbClientPtr>& vivos() {
+    static std::vector<drogon::orm::DbClientPtr> clientes;
+    return clientes;
+}
+
 class TempDb {
 public:
     TempDb() : path_{fs::temp_directory_path() / uniqueName()} {
@@ -48,6 +56,17 @@ public:
         client_ = drogon::orm::DbClient::newSqlite3Client("filename=" + path_.string(), 1);
     }
     ~TempDb() {
+        // El cliente NO se destruye, a proposito. Cerrar uno de Drogon mientras
+        // todavia hay callbacks en vuelo termina ejecutando una consulta sobre
+        // una conexion ya cerrada: sale un "Connection is not ready", la
+        // BrokenConnection viaja por una corrutina que ya nadie espera y el
+        // proceso aborta DESPUES de que el test haya pasado. En CI eso es
+        // indistinguible de un fallo real.
+        //
+        // Es el mismo motivo por el que jobs_test.cpp deja vivo su cliente de
+        // Redis. Un binario de tests dura lo que dura, y el archivo se puede
+        // borrar igual: en POSIX, unlink sobre un archivo abierto funciona.
+        vivos().push_back(client_);
         client_.reset();
         std::error_code ec;
         fs::remove(path_, ec);

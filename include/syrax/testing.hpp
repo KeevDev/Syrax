@@ -459,7 +459,14 @@ private:
         live_      = false;
         instance() = nullptr;
 
-        db_.reset();
+        // El cliente NO se suelta aqui. Soltarlo mientras Drogon todavia tiene
+        // callbacks en vuelo -un async_run de la idempotencia, un job- termina
+        // ejecutando una consulta sobre una conexion ya cerrada: sale un
+        // "Connection is not ready" y el proceso aborta DESPUES de que los
+        // tests hayan pasado, que en CI es indistinguible de un fallo real.
+        //
+        // Es el mismo motivo por el que los fixtures de sqlite y el cliente de
+        // Redis de jobs_test se quedan vivos. El proceso esta terminando.
         drogon::app().getLoop()->queueInLoop([] { drogon::app().quit(); });
         thread_.join();
     }

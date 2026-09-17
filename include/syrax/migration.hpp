@@ -204,9 +204,22 @@ public:
     }
 
     // created_at / updated_at con default del motor.
+    //
+    // El default cubre las filas que entran por fuera de syrax -un seeder, un
+    // INSERT a mano, una importacion-; para las que pasan por save(), el valor
+    // lo pone el query builder.
     void timestamps() {
         timestamp("created_at").defaultTo(now_);
         timestamp("updated_at").defaultTo(now_);
+    }
+
+    // deleted_at, la columna del borrado logico.
+    //
+    // Nullable y con indice: una vez que softDeletes esta puesto, TODA consulta
+    // del modelo lleva "deleted_at IS NULL", asi que es la columna mas
+    // consultada de la tabla y la que menos se piensa en indexar.
+    Column& softDeletes(std::string name = "deleted_at") {
+        return timestamp(std::move(name)).nullable().index();
     }
 
     Column& foreignId(std::string name, std::string refTable, std::string refColumn = "id") {

@@ -108,6 +108,12 @@ struct Claims {
     std::int64_t exp = 0;     // expira en (epoch seconds)
     std::int64_t iat = 0;     // emitido en
     std::string  role;        // opcional, util para autorizacion simple
+
+    // Permisos finos, separados por espacios: "pedidos:leer pedidos:escribir".
+    // El formato no es un capricho: es el que define OAuth2 para el claim
+    // `scope`, asi que un token de Auth0, Keycloak o Cognito ya viene asi y
+    // requireScope() funciona sobre el sin traducir nada.
+    std::string scope;
 };
 
 // Firma un JWT con HS256.
@@ -214,6 +220,7 @@ inline Middleware bearer(std::string secret) {
 
         request.set("auth.sub", claims->sub);
         request.set("auth.role", claims->role);
+        request.set("auth.scope", claims->scope);
         return std::nullopt;
     };
 }

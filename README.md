@@ -973,6 +973,107 @@ Tres cosas antes de montarlo: corre **una sola instancia** (dos schedulers encol
 
 ---
 
+### Permisos finos
+
+Un rol es singular: un actor tiene uno. Los permisos son un conjunto, y viajan en el claim `scope` del token con el formato que define OAuth2 —separados por espacios—, así que un token de Auth0, Keycloak o Cognito ya encaja sin traducir nada.
+
+```cpp
+const auto actor = syrax::actorFrom(request);
+
+if (auto denied = syrax::requireScope(actor, "pedidos:escribir")) co_return *denied;
+```
+
+Ojo a la asimetría con `requireRole`, que no es un descuido: **`requireScope` exige TODOS** los permisos que se le listan, porque listar varios requisitos quiere decir que hacen falta los dos. Cuando la intención es la otra, está `requireAnyScope`, escrito aparte para que la diferencia se lea en el nombre.
+
+Sin comodines: un `pedidos:*` obliga a decidir si cubre `pedidos:escribir:urgente`, y ahí empieza un lenguaje de patrones que no tiene fondo.
+
+---
+
+### Soft deletes y timestamps
+
+Se declaran en el modelo, no se deducen de que existan las columnas. Deducirlas sería más corto de escribir y peor de vivir: alguien agrega un `deleted_at` para su propia contabilidad y de pronto DELETE deja de borrar, sin que nada en su código lo diga.
+
+```cpp
+struct Pedido {
+    std::int64_t id;
+    // ...
+    static constexpr auto table       = "pedidos";
+    static constexpr auto timestamps  = true;   // created_at / updated_at
+    static constexpr auto softDeletes = true;   // deleted_at
+};
+```
+
+```cpp
+co_await Query<Pedido>().where(&Pedido::id, "=", id).del();   // marca, no borra
+
+Query<Pedido>().withTrashed()    // también los borrados
+Query<Pedido>().onlyTrashed()    // la papelera
+Query<Pedido>().restore()        // deshacer
+Query<Pedido>().forceDelete()    // borrar de verdad
+```
+
+Y en la migración, `table.timestamps()` y `table.softDeletes()` —esta última nullable y **con índice**, porque a partir de ahí toda consulta del modelo lleva `deleted_at IS NULL` y es la columna más consultada de la tabla.
+
+La hora la pone la **base**, no el proceso: con varias instancias los relojes difieren y dos filas creadas en orden pueden quedar con timestamps cruzados.
+
+Si el modelo declara `created_at` como campo, se **lee** pero no se escribe desde el struct: un objeto recién construido lo tiene vacío y lo pisaría con basura.
+
+---
+
+### Auditoría
+
+"¿Quién cambió el precio de este pedido?" es la pregunta que llega siempre y siempre tarde. Un log de acceso dice que hubo un PUT, no qué cambió.
+
+```cpp
+co_await syrax::audit::record(request, {
+    .action  = "pedido.precio_cambiado",
+    .subject = "pedidos:" + std::to_string(id),
+    .data    = R"({"antes":100,"despues":90})",
+});
+```
+
+El actor sale del token y el request-id de la trazabilidad, así que la entrada queda cosida a la traza sin copiarlos a mano: una línea de auditoría se puede cruzar con el log de acceso de esa misma petición.
+
+**Dentro de la transacción que hace el cambio**, que es la parte que importa:
+
+```cpp
+co_await syrax::db::transaction([&](const syrax::db::Tx& tx) -> syrax::Task<void> {
+    co_await repo::bajarPrecio(id, 90, tx.client());
+    co_await syrax::audit::record(request, {...}, tx.client());
+});
+```
+
+Si el cambio se deshace, la línea también. Una auditoría que registra cosas que no pasaron es peor que no tenerla, porque se confía en ella.
+
+Para leer: `audit::of("pedidos:42")` cuenta la vida de un recurso y `audit::by("ada")` lo que hizo alguien. `audit::install()` crea la tabla; va en bootstrap.
+
+Es **append-only por contrato, no por magia**: aquí no hay nada que actualice ni borre una entrada, y eso es todo lo que puede prometer un framework. Que nadie con acceso a la base la toque se consigue con permisos o un trigger, y eso es del despliegue.
+
+---
+
+### Llamar a otra API
+
+Toda API llama a otra API, y el cliente HTTP es donde se escriben siempre los mismos tres errores.
+
+```cpp
+auto pagos = syrax::http::Client{"http://pagos:8080"};
+
+const auto respuesta = co_await pagos.trace(request).bearer(token).post("/cobros", cuerpo);
+if (!respuesta.ok()) co_return syrax::BadGateway("el cobro no salio");
+```
+
+| El error | Qué hace esto |
+|---|---|
+| **No poner timeout.** Drogon lo deja en cero, que es esperar para siempre: el servicio de enfrente se cuelga y el tuyo se queda sin hilos | 10 s de fábrica; hay que quitarlo a mano para no tenerlo |
+| **Reintentar un POST.** Parece gratis hasta que la primera llamada sí llegó y lo que se perdió fue la respuesta: entonces cobra dos veces | Reintenta **sólo** métodos idempotentes —GET, HEAD, PUT, DELETE, OPTIONS— con espera creciente |
+| **Perder la traza.** Una petición que cruza tres servicios y falla en el tercero no se reconstruye si cada salto estrena su propio id | `trace(request)` propaga el `X-Request-Id` |
+
+Un 4xx no se reintenta: el servidor entendió y dijo que no. El 429 sí, porque dice "ahora no" y no "nunca". Y un fallo de transporte no lanza: vuelve como `status == 0` con el motivo en `.error`, porque que otro servicio no conteste es un resultado posible, no algo excepcional.
+
+Se planta ahí: **sin circuit breaker y sin descubrimiento de servicios**. El primero mal ajustado convierte una degradación parcial en una caída total; el segundo lo resuelve el despliegue, que ve todas las instancias mientras que un proceso sólo se ve a sí mismo.
+
+---
+
 ### Middleware, autenticación y políticas
 
 Un middleware es una función que recibe la petición y devuelve un `Error` para cortar, o nada para dejar pasar. Sin clases, sin registro global:

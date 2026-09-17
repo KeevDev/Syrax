@@ -9,6 +9,7 @@
 
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -44,6 +45,13 @@ struct Invoice {
     static constexpr auto table = "invoices";
 };
 
+// Los clientes que se quedan vivos hasta que muere el proceso. Ver la nota del
+// destructor de cada fixture.
+inline std::vector<drogon::orm::DbClientPtr>& vivos() {
+    static std::vector<drogon::orm::DbClientPtr> clientes;
+    return clientes;
+}
+
 class TempDb {
 public:
     TempDb() : path_{fs::temp_directory_path() / name()} {
@@ -71,6 +79,17 @@ public:
             "INSERT INTO invoices (status, total) VALUES (1, 100), (2, 200), (3, 300)");
     }
     ~TempDb() {
+        // El cliente NO se destruye, a proposito. Cerrar uno de Drogon mientras
+        // todavia hay callbacks en vuelo termina ejecutando una consulta sobre
+        // una conexion ya cerrada: sale un "Connection is not ready", la
+        // BrokenConnection viaja por una corrutina que ya nadie espera y el
+        // proceso aborta DESPUES de que el test haya pasado. En CI eso es
+        // indistinguible de un fallo real.
+        //
+        // Es el mismo motivo por el que jobs_test.cpp deja vivo su cliente de
+        // Redis. Un binario de tests dura lo que dura, y el archivo se puede
+        // borrar igual: en POSIX, unlink sobre un archivo abierto funciona.
+        vivos().push_back(client_);
         client_.reset();
         std::error_code ec;
         fs::remove(path_, ec);
@@ -600,4 +619,208 @@ TEST_CASE("el numero de paginas redondea hacia arriba", "[query][paginate]") {
     CHECK(drogon::sync_wait(Query<User>(db.get()).paginate(1, 3)).pages == 2);
     CHECK(drogon::sync_wait(Query<User>(db.get()).paginate(1, 4)).pages == 1);
     CHECK(drogon::sync_wait(Query<User>(db.get()).paginate(1, 1)).pages == 4);
+}
+
+// ----------------------------------------------- soft deletes y timestamps
+
+namespace qtest {
+
+struct Note {
+    std::int64_t               id;
+    std::string                body;
+    std::optional<std::string> created_at;
+    std::optional<std::string> updated_at;
+    std::optional<std::string> deleted_at;
+
+    static constexpr auto table       = "notes";
+    static constexpr auto timestamps  = true;
+    static constexpr auto softDeletes = true;
+};
+
+// La misma tabla, sin declarar nada: para comprobar que sin los marcadores el
+// comportamiento es el de siempre.
+struct Plain {
+    std::int64_t id;
+    std::string  body;
+
+    static constexpr auto table = "notes";
+};
+
+class NotesDb {
+public:
+    NotesDb() : path_{fs::temp_directory_path() / name()} {
+        std::error_code ec;
+        fs::remove(path_, ec);
+
+        client_ = drogon::orm::DbClient::newSqlite3Client("filename=" + path_.string(), 1);
+        client_->execSqlSync(
+            "CREATE TABLE notes (id INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT, "
+            "created_at TEXT, updated_at TEXT, deleted_at TEXT)");
+    }
+    ~NotesDb() {
+        // El cliente NO se destruye, a proposito. Cerrar uno de Drogon mientras
+        // todavia hay callbacks en vuelo termina ejecutando una consulta sobre
+        // una conexion ya cerrada: sale un "Connection is not ready", la
+        // BrokenConnection viaja por una corrutina que ya nadie espera y el
+        // proceso aborta DESPUES de que el test haya pasado. En CI eso es
+        // indistinguible de un fallo real.
+        //
+        // Es el mismo motivo por el que jobs_test.cpp deja vivo su cliente de
+        // Redis. Un binario de tests dura lo que dura, y el archivo se puede
+        // borrar igual: en POSIX, unlink sobre un archivo abierto funciona.
+        vivos().push_back(client_);
+        client_.reset();
+        std::error_code ec;
+        fs::remove(path_, ec);
+    }
+
+    const drogon::orm::DbClientPtr& get() const { return client_; }
+
+private:
+    static std::string name() {
+        static int counter = 0;
+        return "syrax_notes_" + std::to_string(::getpid()) + "_" + std::to_string(counter++) + ".db";
+    }
+
+    fs::path                 path_;
+    drogon::orm::DbClientPtr client_;
+};
+
+}  // namespace qtest
+
+TEST_CASE("save rellena created_at y updated_at al insertar", "[query][timestamps]") {
+    SqliteDialect dialect;
+    NotesDb       db;
+
+    Note nota{.id = 0, .body = "primera"};
+    drogon::sync_wait(syrax::save(nota, db.get()));
+
+    // Vuelven rellenos por el RETURNING: el modelo los declara, asi que se
+    // leen aunque no se escriban desde el struct.
+    REQUIRE(nota.created_at.has_value());
+    REQUIRE(nota.updated_at.has_value());
+    CHECK_FALSE(nota.created_at->empty());
+}
+
+TEST_CASE("un campo de timestamp vacio no pisa el de la base", "[query][timestamps]") {
+    SqliteDialect dialect;
+    NotesDb       db;
+
+    // El caso que rompe una implementacion ingenua: el struct trae el campo a
+    // nullopt y, si se escribiera desde ahi, el created_at quedaria NULL.
+    Note nota{.id = 0, .body = "x", .created_at = std::nullopt};
+    drogon::sync_wait(syrax::save(nota, db.get()));
+
+    const auto fila = db.get()->execSqlSync("SELECT created_at FROM notes");
+    REQUIRE(fila.size() == 1);
+    CHECK_FALSE(fila.front()["created_at"].isNull());
+}
+
+TEST_CASE("update() toca updated_at sin que nadie lo pida", "[query][timestamps]") {
+    SqliteDialect dialect;
+    NotesDb       db;
+
+    db.get()->execSqlSync(
+        "INSERT INTO notes (body, created_at, updated_at) VALUES ('vieja', '2020-01-01', '2020-01-01')");
+
+    drogon::sync_wait(Query<Note>(db.get()).set(&Note::body, std::string{"nueva"}).update());
+
+    const auto fila = db.get()->execSqlSync("SELECT body, updated_at FROM notes");
+    CHECK(fila.front()["body"].as<std::string>() == "nueva");
+
+    // Una fila que cambia y deja el updated_at viejo tiene un campo mintiendo.
+    CHECK(fila.front()["updated_at"].as<std::string>() != "2020-01-01");
+}
+
+TEST_CASE("del() marca en vez de borrar, y la fila desaparece", "[query][softdeletes]") {
+    SqliteDialect dialect;
+    NotesDb       db;
+
+    Note nota{.id = 0, .body = "borrame"};
+    drogon::sync_wait(syrax::save(nota, db.get()));
+
+    CHECK(drogon::sync_wait(Query<Note>(db.get()).del()) == 1);
+
+    // Ya no se ve...
+    CHECK(drogon::sync_wait(Query<Note>(db.get()).count()) == 0);
+
+    // ...pero sigue en la tabla, que es justo el punto.
+    CHECK(db.get()->execSqlSync("SELECT id FROM notes").size() == 1);
+}
+
+TEST_CASE("withTrashed las incluye y onlyTrashed deja solo esas", "[query][softdeletes]") {
+    SqliteDialect dialect;
+    NotesDb       db;
+
+    Note viva{.id = 0, .body = "viva"};
+    Note muerta{.id = 0, .body = "muerta"};
+    drogon::sync_wait(syrax::save(viva, db.get()));
+    drogon::sync_wait(syrax::save(muerta, db.get()));
+
+    drogon::sync_wait(Query<Note>(db.get()).where(&Note::body, "=", std::string{"muerta"}).del());
+
+    CHECK(drogon::sync_wait(Query<Note>(db.get()).count()) == 1);
+    CHECK(drogon::sync_wait(Query<Note>(db.get()).withTrashed().count()) == 2);
+    CHECK(drogon::sync_wait(Query<Note>(db.get()).onlyTrashed().count()) == 1);
+
+    const auto papelera = drogon::sync_wait(Query<Note>(db.get()).onlyTrashed().get());
+    REQUIRE(papelera.size() == 1);
+    CHECK(papelera.front().body == "muerta");
+}
+
+TEST_CASE("el filtro de borrados no rompe un where con OR", "[query][softdeletes]") {
+    SqliteDialect dialect;
+    NotesDb       db;
+
+    Note a{.id = 0, .body = "a"};
+    Note b{.id = 0, .body = "b"};
+    drogon::sync_wait(syrax::save(a, db.get()));
+    drogon::sync_wait(syrax::save(b, db.get()));
+    drogon::sync_wait(Query<Note>(db.get()).where(&Note::body, "=", std::string{"b"}).del());
+
+    // Sin parentesis alrededor del where del usuario, esto se leeria como
+    // "a = 'a' OR (b = 'b' AND no borrado)" y devolveria la fila borrada.
+    const auto encontradas = drogon::sync_wait(Query<Note>(db.get())
+                                                   .where(&Note::body, "=", std::string{"a"})
+                                                   .orWhere(&Note::body, "=", std::string{"b"})
+                                                   .get());
+
+    REQUIRE(encontradas.size() == 1);
+    CHECK(encontradas.front().body == "a");
+}
+
+TEST_CASE("restore deshace el borrado", "[query][softdeletes]") {
+    SqliteDialect dialect;
+    NotesDb       db;
+
+    Note nota{.id = 0, .body = "vuelve"};
+    drogon::sync_wait(syrax::save(nota, db.get()));
+    drogon::sync_wait(Query<Note>(db.get()).del());
+    REQUIRE(drogon::sync_wait(Query<Note>(db.get()).count()) == 0);
+
+    CHECK(drogon::sync_wait(Query<Note>(db.get()).restore()) == 1);
+    CHECK(drogon::sync_wait(Query<Note>(db.get()).count()) == 1);
+}
+
+TEST_CASE("forceDelete borra de verdad", "[query][softdeletes]") {
+    SqliteDialect dialect;
+    NotesDb       db;
+
+    Note nota{.id = 0, .body = "adios"};
+    drogon::sync_wait(syrax::save(nota, db.get()));
+
+    CHECK(drogon::sync_wait(Query<Note>(db.get()).forceDelete()) == 1);
+    CHECK(db.get()->execSqlSync("SELECT id FROM notes").empty());
+}
+
+TEST_CASE("sin los marcadores, del() borra como siempre", "[query][softdeletes]") {
+    SqliteDialect dialect;
+    NotesDb       db;
+
+    db.get()->execSqlSync("INSERT INTO notes (body) VALUES ('cualquiera')");
+
+    // La tabla TIENE deleted_at, pero el modelo no declara softDeletes: el
+    // comportamiento no puede cambiar por como se llame una columna.
+    CHECK(drogon::sync_wait(Query<Plain>(db.get()).del()) == 1);
+    CHECK(db.get()->execSqlSync("SELECT id FROM notes").empty());
 }

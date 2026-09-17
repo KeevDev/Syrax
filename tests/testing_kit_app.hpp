@@ -16,6 +16,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <optional>
@@ -92,6 +93,13 @@ inline syrax::Task<std::optional<models::Widget>> create(std::string name, int s
 
 }  // namespace repository
 
+// Cuantas veces se ha llamado a las rutas de prueba del cliente HTTP. Lo unico
+// que distingue un reintento de una llamada suelta es este numero.
+inline std::atomic<int>& hits() {
+    static std::atomic<int> n{0};
+    return n;
+}
+
 namespace bootstrap {
 
 // Crear un cliente de Drogon contra un puerto muerto y soltarlo termina
@@ -165,6 +173,49 @@ inline syrax::App create() {
     // Fuera de la base de la API, asi que tambien comprueba que resolve() no le
     // pega el prefijo.
     app.health();
+
+    // --- rutas para el cliente HTTP -------------------------------------
+
+    struct Eco {
+        int         hits = 0;
+        std::string requestId;
+        std::string authorization;
+    };
+
+    // Siempre 500: sirve para contar cuantas veces se reintenta.
+    app.get("/falla", []() -> syrax::Result<Eco> {
+        ++hits();
+        return syrax::Error{.status = 500, .message = "siempre falla"};
+    });
+
+    // Sin cuerpo tipado a proposito: con uno, un cuerpo que no encaje daria
+    // 422 antes de llegar al handler y el contador no veria la llamada.
+    app.post("/falla", []() -> syrax::Result<Eco> {
+        ++hits();
+        return syrax::Error{.status = 500, .message = "siempre falla"};
+    });
+
+    // 404: un 4xx no merece otro intento, porque repetirlo da lo mismo.
+    app.get("/no-esta", []() -> syrax::Result<Eco> {
+        ++hits();
+        return syrax::Error{.status = 404, .message = "no esta"};
+    });
+
+    // Devuelve lo que recibio, para ver que cabeceras cruzaron.
+    app.get("/eco", [](const syrax::Request& request) -> syrax::Result<Eco> {
+        ++hits();
+        return Eco{
+            .hits          = hits(),
+            .requestId     = request.header("X-Request-Id"),
+            .authorization = request.header("Authorization"),
+        };
+    });
+
+    app.get("/cuenta", []() -> syrax::Result<Eco> { return Eco{.hits = hits()}; });
+    app.get("/reinicia", []() -> syrax::Result<Eco> {
+        hits() = 0;
+        return Eco{.hits = 0};
+    });
 
     // El limitador compartido, solo si hay Redis. Va con prefijo para que no
     // le corte las peticiones a los demas tests del binario, y cuenta por una

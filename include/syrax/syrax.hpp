@@ -1,6 +1,7 @@
 #pragma once
 
 #include <syrax/app.hpp>
+#include <syrax/audit.hpp>
 #include <syrax/auth.hpp>
 #include <syrax/cache.hpp>
 #include <syrax/config.hpp>
@@ -9,6 +10,7 @@
 #include <syrax/errors.hpp>
 #include <syrax/fields.hpp>
 #include <syrax/health.hpp>
+#include <syrax/http.hpp>
 #include <syrax/jobs.hpp>
 #include <syrax/log.hpp>
 #include <syrax/middleware.hpp>

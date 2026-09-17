@@ -80,8 +80,13 @@ TEST_CASE("cada clave tiene su propia cuota", "[middleware]") {
         return;
     }
 
+    // Con margen de sobra sobre el limite de 3. El limitador falla ABIERTO a
+    // proposito -si Redis no contesta, la peticion pasa-, y con ocho procesos
+    // de test golpeando el mismo Redis un tropiezo suelto es posible. Cuatro
+    // peticiones justas harian que ese tropiezo pareciera un fallo del
+    // limitador; con diez, la cuota se agota igual.
     const auto gastado = unico("gastado");
-    for (int i = 0; i < 4; ++i) pedir(gastado);
+    for (int i = 0; i < 10; ++i) pedir(gastado);
     REQUIRE(pedir(gastado).status == 429);
 
     // Otro cliente no paga lo que gasto el primero, que es la diferencia

@@ -25,6 +25,10 @@ a veces con otro nombre. Conviene mirar aquí primero.
 | **Guards** | `middleware.hpp` + `policy.hpp` | Un guard es un middleware que devuelve `Error`. Es el mismo concepto con otro nombre. |
 | **Policies / ABAC** | `policy.hpp` | Una policy *es* una función sobre actor + recurso: eso ya es ABAC, sin el vocabulario. |
 | **RBAC** | `policy.hpp` → `requireRole(actor, "admin", "editor")` | Roles simples. Una tabla de permisos editable en runtime es aplicación, no framework. |
+| **Scopes / permisos finos** | `policy.hpp` → `requireScope`, `requireAnyScope`, `Actor::can` | Formato de OAuth2, sin comodines. |
+| **Soft deletes** | `query.hpp` → `softDeletes` en el modelo | Con `withTrashed`, `onlyTrashed`, `restore` y `forceDelete`. |
+| **Auditoría** | `audit.hpp` → `record`, `of`, `by` | Append-only, y transaccional si se le pasa el cliente de la transacción. |
+| **Cliente HTTP** | `http.hpp` → `http::Client` | Timeout, reintentos sólo idempotentes y propagación del request-id. |
 | **DTOs** | `resources/` y `requests/` del andamiaje | Son DTOs de entrada y de salida, con el nombre que usa el README. |
 | **Cache abstraction** | `cache.hpp` → `get/put/forget/has/remember` | La abstracción existe; el único driver es Redis. |
 | **Healthcheck** | `health.hpp` → `app.health()` | Pregunta a cada base y cada Redis registrados. `health::probe()` agrega las del proyecto. |
@@ -63,6 +67,10 @@ qué se cerró; lo que sigue pendiente está en el nivel 2.
 | **`Idempotency-Key`** | `idempotency.hpp` + `app.idempotency()`: el reintento devuelve la respuesta guardada. La misma clave con otro cuerpo es un 422, dos simultáneas son un 409, y un 5xx suelta la clave. |
 | **Paginación estándar** | `Query<T>::paginate(page, per)` devuelve un `Page<T>` con `data`, `total`, `page`, `perPage`, `pages` y `hasMore`, y OpenAPI lo documenta sin que nadie lo escriba. |
 | **Serialización parcial** | `app.partial()`: `?fields=id,name` recorta la respuesta. En una página filtra dentro de `data` y deja el sobre entero. Un `fields` con sólo nombres inventados es un 400, no objetos vacíos. |
+| **Scopes** | `requireScope(actor, "pedidos:escribir")` exige TODOS; `requireAnyScope` se conforma con uno. El claim `scope` viaja como lo define OAuth2, así que un token de un tercero ya encaja. |
+| **Soft deletes y timestamps** | `static constexpr auto softDeletes` / `timestamps` en el modelo. `del()` marca en vez de borrar, `withTrashed()` / `onlyTrashed()` / `restore()` / `forceDelete()`, y `created_at`/`updated_at` los pone la base. |
+| **Auditoría** | `audit.hpp`: tabla append-only con quién, qué, sobre qué y el request-id, que sale de la trazabilidad sin copiarlo a mano. Dentro de la transacción que hace el cambio, para que no registre cosas que no pasaron. |
+| **Cliente HTTP** | `http.hpp`: timeout de fábrica, reintento con espera creciente **sólo en métodos idempotentes**, y `trace(request)` que propaga el `X-Request-Id`. Sin breaker ni descubrimiento. |
 
 Tres cosas que cambiaron de plan por el camino:
 
@@ -83,11 +91,7 @@ Tres cosas que cambiaron de plan por el camino:
 | Qué | Por qué | Coste |
 |---|---|---|
 | **Validar tokens de terceros** (`auth::jwks(url)`) | La parte finita y útil de OAuth2/OIDC: verificar la firma de un token de Auth0, Keycloak o Cognito contra su JWKS, con caché de claves. *Ser* el proveedor no entra (ver abajo). | Medio |
-| **Scopes** | `requireScope(actor, "pedidos:escribir")` junto a `requireRole`. Veinte líneas, y es lo que esperan los tokens de terceros del punto anterior. | Bajo |
-| **Soft deletes y timestamps** | `deleted_at` filtrado por defecto, `created_at`/`updated_at` automáticos. La conveniencia que todo el mundo reimplementa mal. | Medio |
 | **Subida de archivos con reglas** | `request.file("avatar")` con límites de tamaño y mime en el mismo lenguaje que `validation`. El guardado no: eso es storage, y storage no es finito. | Medio |
-| **Auditoría** | Tabla append-only con quién, qué y cuándo, alimentada desde el `Actor` y el request-id. Se apoya entera en la capa de trazabilidad. | Medio |
-| **Cliente HTTP** | Toda API llama a otra API. Drogon ya trae el cliente; lo que falta es lo que siempre se escribe a mano mal: timeout por defecto, reintento con espera creciente sólo en métodos idempotentes, y **propagar el `X-Request-Id`** para que la traza cruce el salto. Se planta ahí: sin breaker, sin descubrimiento. | Medio |
 | **Métricas** | Frontera: cuatro contadores en `/metrics` sí es finito; el día que alguien pida histogramas con labels, no. Después del nivel 1. | Medio |
 | **`syrax new` con asistente** | Preguntar base, cache, auth y docs en vez de sólo el motor. **Con cuidado:** cada eje multiplica las combinaciones que hay que compilar en el CI. Entra sólo si cada pregunta cambia archivos de verdad, y con pocos ejes. | Medio |
 | **Multi-tenancy por fila** | `tenant_id` con un scope global en `Query<T>`. Sólo el modelo de fila: el de esquema y el de base por tenant son decisiones que no se pueden desandar, y un framework no debería elegirlas por ti. | Medio |

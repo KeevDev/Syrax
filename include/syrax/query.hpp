@@ -75,6 +75,45 @@ concept HasTable = requires { T::table; };
 template <typename T>
 concept HasPrimaryKey = requires { T::primaryKey; };
 
+// Las dos conveniencias van declaradas en el modelo, no deducidas de que
+// existan las columnas. Deducirlas seria mas corto de escribir y peor de vivir:
+// alguien agrega un `deleted_at` para su propia contabilidad y de pronto
+// DELETE deja de borrar, sin que nada en su codigo lo diga. Asi se lee en el
+// modelo, que es donde se va a buscar.
+//
+//   static constexpr auto timestamps  = true;   // created_at / updated_at
+//   static constexpr auto softDeletes = true;   // deleted_at
+template <typename T>
+concept Timestamps = requires { T::timestamps; };
+
+template <typename T>
+concept SoftDeletes = requires { T::softDeletes; };
+
+// Los nombres son fijos. Hacerlos configurables anade tres puntos de
+// configuracion para ahorrar un rename en la migracion, y estos tres nombres
+// son los que usa todo el mundo.
+inline constexpr std::string_view kCreatedAt = "created_at";
+inline constexpr std::string_view kUpdatedAt = "updated_at";
+inline constexpr std::string_view kDeletedAt = "deleted_at";
+
+// La hora la pone la BASE, no el proceso. Con varias instancias, los relojes
+// de las maquinas difieren y dos filas creadas en orden pueden quedar con
+// timestamps cruzados; el servidor de base es uno solo.
+inline constexpr std::string_view kNow = "CURRENT_TIMESTAMP";
+
+// Si una columna la gestiona el framework, para no escribirla tambien desde el
+// struct: si el modelo la declara como campo se lee, pero no se escribe.
+template <typename T>
+bool managedColumn(const std::string& key) {
+    if constexpr (Timestamps<T>) {
+        if (key == kCreatedAt || key == kUpdatedAt) return true;
+    }
+    if constexpr (SoftDeletes<T>) {
+        if (key == kDeletedAt) return true;
+    }
+    return false;
+}
+
 template <typename T>
 std::string tableOf() {
     static_assert(HasTable<T>,
@@ -225,6 +264,26 @@ public:
         return *this;
     }
 
+    // Incluye tambien las filas borradas. Solo tiene sentido en un modelo con
+    // softDeletes; en los demas no hay nada que incluir y no compila, que es
+    // mejor que pasar desapercibido.
+    Query& withTrashed() {
+        static_assert(detail::SoftDeletes<T>,
+                      "syrax: withTrashed() necesita `static constexpr auto softDeletes = true;` "
+                      "en el modelo. Sin eso no hay filas borradas que incluir.");
+        trashed_ = Trashed::With;
+        return *this;
+    }
+
+    // Solo las borradas: la papelera.
+    Query& onlyTrashed() {
+        static_assert(detail::SoftDeletes<T>,
+                      "syrax: onlyTrashed() necesita `static constexpr auto softDeletes = true;` "
+                      "en el modelo.");
+        trashed_ = Trashed::Only;
+        return *this;
+    }
+
     Query& limit(std::size_t count)  { limit_  = count;  return *this; }
     Query& offset(std::size_t count) { offset_ = count;  return *this; }
 
@@ -304,8 +363,51 @@ public:
     }
 
     // Borra las filas que cumplen los filtros. Devuelve cuantas.
+    //
+    // Con softDeletes no borra: marca `deleted_at`, y a partir de ahi esas
+    // filas dejan de aparecer en las consultas normales. La fila sigue en la
+    // tabla, que es el punto: un borrado de verdad no se deshace, y la mitad
+    // de las veces que alguien borra algo en produccion querria deshacerlo.
     drogon::Task<std::size_t> del() const {
+        if constexpr (detail::SoftDeletes<T>) {
+            const std::string sql = "UPDATE \"" + detail::tableOf<T>() + "\" SET \"" +
+                                    std::string{detail::kDeletedAt} + "\" = " +
+                                    std::string{detail::kNow} + whereClause();
+
+            const auto result = co_await detail::run(target(), sql, params_);
+            co_return result.affectedRows();
+        } else {
+            const std::string sql =
+                "DELETE FROM \"" + detail::tableOf<T>() + "\"" + whereClause();
+
+            const auto result = co_await detail::run(target(), sql, params_);
+            co_return result.affectedRows();
+        }
+    }
+
+    // Borra de verdad, aunque el modelo tenga softDeletes. Existe porque
+    // "borrar para siempre" es una operacion legitima -el RGPD la exige- y
+    // esconderla obligaria a escribir el DELETE a mano, sin los filtros.
+    drogon::Task<std::size_t> forceDelete() const {
         const std::string sql = "DELETE FROM \"" + detail::tableOf<T>() + "\"" + whereClause();
+
+        const auto result = co_await detail::run(target(), sql, params_);
+        co_return result.affectedRows();
+    }
+
+    // Deshace el borrado. Solo toca filas borradas, sin que haya que pedir
+    // onlyTrashed(): restaurar una fila viva no significa nada.
+    drogon::Task<std::size_t> restore() const {
+        static_assert(detail::SoftDeletes<T>,
+                      "syrax: restore() necesita `static constexpr auto softDeletes = true;` "
+                      "en el modelo.");
+
+        Query copy{*this};
+        copy.trashed_ = Trashed::Only;
+
+        const std::string sql = "UPDATE \"" + detail::tableOf<T>() + "\" SET \"" +
+                                std::string{detail::kDeletedAt} + "\" = NULL" +
+                                copy.whereClause();
 
         const auto result = co_await detail::run(target(), sql, params_);
         co_return result.affectedRows();
@@ -390,7 +492,23 @@ private:
     }
 
     std::string whereClause() const {
-        return where_.empty() ? std::string{} : " WHERE " + where_;
+        std::string clause = where_;
+
+        if constexpr (detail::SoftDeletes<T>) {
+            const std::string column = "\"" + std::string{detail::kDeletedAt} + "\"";
+
+            std::string extra;
+            if (trashed_ == Trashed::Without)   extra = column + " IS NULL";
+            else if (trashed_ == Trashed::Only) extra = column + " IS NOT NULL";
+
+            if (!extra.empty()) {
+                // Los parentesis no son cosmeticos: sin ellos, un filtro con OR
+                // -"a = 1 OR b = 2"- se combinaria como "a = 1 OR (b = 2 AND no
+                // borrado)" y devolveria filas borradas.
+                clause = clause.empty() ? extra : "(" + clause + ") AND " + extra;
+            }
+        }
+        return clause.empty() ? std::string{} : " WHERE " + clause;
     }
 
     // Postgres numera los parametros, asi que el SET puede quedarse con los
@@ -405,6 +523,14 @@ private:
             if (i) assignments += ", ";
             assignments += "\"" + sets_[i].column + "\" = " +
                            detail::placeholder(numbered ? params_.size() + i + 1 : i + 1);
+        }
+
+        // Una fila que cambia y no actualiza su updated_at deja el campo
+        // mintiendo, que es peor que no tenerlo. Va sin parametro porque la
+        // hora la pone la base.
+        if constexpr (detail::Timestamps<T>) {
+            assignments += ", \"" + std::string{detail::kUpdatedAt} + "\" = " +
+                           std::string{detail::kNow};
         }
 
         std::vector<detail::ParamBinder> params;
@@ -437,6 +563,8 @@ private:
         detail::ParamBinder bind;
     };
 
+    enum class Trashed { Without, With, Only };
+
     drogon::orm::DbClientPtr         client_;
     std::string                      where_;
     std::string                      order_;
@@ -445,6 +573,7 @@ private:
     std::vector<detail::ParamBinder> params_;
     std::vector<Assignment>          sets_;
     std::size_t                      paramBase_ = 0;
+    Trashed                          trashed_   = Trashed::Without;
 };
 
 // --------------------------------------------------------- persistencia
@@ -494,6 +623,12 @@ drogon::Task<void> save(T& value, drogon::orm::DbClientPtr on = nullptr) {
             const std::string key{keys[I]};
             if (key == primary) return;
 
+            // created_at, updated_at y deleted_at los lleva el framework. Si
+            // el modelo los declara como campos se LEEN -vuelven rellenos del
+            // RETURNING-, pero no se escriben desde el struct: si no, un objeto
+            // recien construido con el campo vacio los pisaria con basura.
+            if (detail::managedColumn<T>(key)) return;
+
             auto&& field = glz::get_member(value, glz::get<I>(glz::to_tie(value)));
 
             if (!columns.empty()) { columns += ", "; slots += ", "; assignments += ", "; }
@@ -506,6 +641,20 @@ drogon::Task<void> save(T& value, drogon::orm::DbClientPtr on = nullptr) {
             params.push_back(detail::binder(field));
         }(), ...);
     }(std::make_index_sequence<kSize>{});
+
+    if constexpr (detail::Timestamps<T>) {
+        if (isInsert) {
+            if (!columns.empty()) { columns += ", "; slots += ", "; }
+
+            columns += "\"" + std::string{detail::kCreatedAt} + "\", \"" +
+                       std::string{detail::kUpdatedAt} + "\"";
+            slots += std::string{detail::kNow} + ", " + std::string{detail::kNow};
+        } else {
+            if (!assignments.empty()) assignments += ", ";
+            assignments += "\"" + std::string{detail::kUpdatedAt} + "\" = " +
+                           std::string{detail::kNow};
+        }
+    }
 
     if (isInsert) {
         const std::string sql = "INSERT INTO \"" + table + "\" (" + columns + ") VALUES (" +

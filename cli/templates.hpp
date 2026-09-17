@@ -1525,6 +1525,27 @@ FROM debian:trixie AS build
 RUN apt-get update && apt-get install -y --no-install-recommends         g++ cmake ninja-build git ca-certificates pkg-config         libjsoncpp-dev uuid-dev zlib1g-dev libssl-dev         libpq-dev libsqlite3-dev libc-ares-dev libbrotli-dev     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
+
+# Las dependencias PRIMERO, en su propia capa. Drogon tarda minutos en
+# compilarse, y si se copiara todo el proyecto antes, cualquier cambio en un
+# controlador invalidaria esta capa y lo recompilaria entero. En cada build y
+# en cada deploy.
+#
+# Los dos fuentes de mentira son para poder CONFIGURAR: el CMakeLists junta las
+# fuentes con un GLOB y necesita un main.cpp para el ejecutable y ademas otro
+# archivo, o la libreria se queda sin ninguna y add_library falla.
+#
+# Y aqui se compila SOLO el target de drogon, nunca el proyecto. Es deliberado:
+# COPY conserva las fechas de los archivos, asi que el main.cpp de verdad llega
+# con fecha ANTERIOR al .o que habria dejado compilar el de mentira, ninja lo
+# daria por actualizado y la imagen acabaria con el binario vacio dentro
+# -arranca, no dice nada y sale con 0-. Si no se compila, no hay .o que se
+# quede rancio.
+COPY CMakeLists.txt .
+RUN mkdir -p src database     && echo 'int main(){}'      > src/main.cpp     && echo 'int _warmup(){return 0;}' > src/_warmup.cpp     && cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release     && cmake --build build --target drogon     && rm -rf src database
+
+# Y ahora el codigo, que es lo que cambia. De aqui para abajo se recompila en
+# segundos porque Drogon ya esta en la capa anterior.
 COPY . .
 RUN cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release     && cmake --build build
 

@@ -1738,6 +1738,8 @@ Syrax escribe muy poco código. Las partes difíciles ya existen, son excelentes
 
 Qué se usa exactamente de Drogon, y qué haría falta para no depender de él, está medido en [docs/SIN-DROGON.md](docs/SIN-DROGON.md).
 
+Lo que está mal o a medias se lleva aparte, en [docs/PENDIENTES.md](docs/PENDIENTES.md).
+
 El pegamento entre ellas no existía. Eso es Syrax.
 
 ---

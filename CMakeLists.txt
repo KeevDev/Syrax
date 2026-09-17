@@ -33,10 +33,16 @@ endif()
 if(SYRAX_BUILD_LIB)
 include(FetchContent)
 
+# Las versiones fijadas, en un solo sitio: las usan tanto FetchContent como
+# el find_package de SYRAX_USE_SYSTEM_DEPS, y desincronizarlas seria compilar
+# contra una y decir que es otra.
+set(SYRAX_GLAZE_VERSION  8.4.0)
+set(SYRAX_DROGON_VERSION 1.9.13)
+
 # --- Glaze: reflection, JSON, JSON Schema ---------------------------------
 FetchContent_Declare(glaze
     GIT_REPOSITORY https://github.com/stephenberry/glaze.git
-    GIT_TAG        v8.4.0
+    GIT_TAG        v${SYRAX_GLAZE_VERSION}
     GIT_SHALLOW    TRUE
 )
 
@@ -48,7 +54,7 @@ set(BUILD_TESTING  OFF CACHE BOOL "" FORCE)
 set(BUILD_ORM      ON  CACHE BOOL "" FORCE)  # DbClient y corrutinas de BD
 FetchContent_Declare(drogon
     GIT_REPOSITORY https://github.com/drogonframework/drogon.git
-    GIT_TAG        v1.9.13
+    GIT_TAG        v${SYRAX_DROGON_VERSION}
     GIT_SHALLOW    TRUE
 )
 
@@ -66,10 +72,53 @@ FetchContent_Declare(drogon
 set(_syrax_policy_min_backup "${CMAKE_POLICY_VERSION_MINIMUM}")
 set(CMAKE_POLICY_VERSION_MINIMUM 3.10)
 
-FetchContent_MakeAvailable(glaze drogon)
+# Por defecto las dependencias se bajan y se fijan a una version concreta, que
+# es lo unico que hace reproducible el build de todo el que use Syrax.
+#
+# SYRAX_USE_SYSTEM_DEPS invierte eso para un caso concreto: una imagen de Docker
+# o un CI donde Drogon YA esta compilado, donde bajarlo y compilarlo otra vez
+# son minutos por build sin ninguna ganancia. Va apagado por defecto a
+# proposito: tener Drogon instalado en la maquina no debe cambiar contra que
+# compila tu proyecto sin que lo hayas pedido.
+#
+# Cuando se enciende, la version se exige EXACTA. Una Drogon distinta de la que
+# se probo es peor que compilarla: los fallos aparecen en ejecucion.
+option(SYRAX_USE_SYSTEM_DEPS
+       "Usar Drogon y Glaze ya instalados en vez de bajarlos (para imagenes y CI)" OFF)
+
+set(_syrax_fetch glaze drogon)
+
+if(SYRAX_USE_SYSTEM_DEPS)
+    find_package(Drogon ${SYRAX_DROGON_VERSION} EXACT QUIET)
+    find_package(glaze ${SYRAX_GLAZE_VERSION} EXACT QUIET)
+
+    if(Drogon_FOUND)
+        list(REMOVE_ITEM _syrax_fetch drogon)
+        message(STATUS "syrax: Drogon ${SYRAX_DROGON_VERSION} del sistema (${Drogon_DIR})")
+    else()
+        message(STATUS "syrax: Drogon ${SYRAX_DROGON_VERSION} no esta instalado, se baja")
+    endif()
+    if(glaze_FOUND)
+        list(REMOVE_ITEM _syrax_fetch glaze)
+        message(STATUS "syrax: glaze ${SYRAX_GLAZE_VERSION} del sistema (${glaze_DIR})")
+    endif()
+endif()
+
+if(_syrax_fetch)
+    FetchContent_MakeAvailable(${_syrax_fetch})
+endif()
+
+# El nombre del target cambia segun de donde venga: find_package instala
+# Drogon::Drogon, FetchContent deja `drogon`.
+if(TARGET Drogon::Drogon)
+    set(SYRAX_DROGON_TARGET Drogon::Drogon)
+else()
+    set(SYRAX_DROGON_TARGET drogon)
+endif()
 
 set(CMAKE_POLICY_VERSION_MINIMUM "${_syrax_policy_min_backup}")
 unset(_syrax_policy_min_backup)
+unset(_syrax_fetch)
 
 # Los warnings de Drogon no son nuestros y no los podemos arreglar: son ruido
 # que esconde los errores propios. Se silencian sin tocar los del codigo del
@@ -91,7 +140,7 @@ target_include_directories(syrax INTERFACE
 )
 target_compile_features(syrax INTERFACE cxx_std_23)
 find_package(OpenSSL REQUIRED)
-target_link_libraries(syrax INTERFACE drogon glaze::glaze OpenSSL::Crypto)
+target_link_libraries(syrax INTERFACE ${SYRAX_DROGON_TARGET} glaze::glaze OpenSSL::Crypto)
 
 install(DIRECTORY include/ DESTINATION include)
 endif()  # SYRAX_BUILD_LIB

@@ -92,7 +92,7 @@ Con `--auth`, el `.env` y `config.hpp` quedan cableados de verdad y `middleware.
 |---|---|
 | **Empezar** | [Instalación](#instalación) · [El asistente de `syrax new`](#el-asistente-de-syrax-new) · [El camino de una petición](#el-camino-de-una-petición) |
 | **[La petición](#la-petición)** | [Errores como valores](#errores-como-valores) · [Validación](#validación) · [Paginación](#paginación) · [Serialización parcial](#serialización-parcial) · [ETag y 304](#etag-y-304) · [Archivos subidos](#archivos-subidos) · [WebSockets](#websockets) |
-| **[La base de datos](#la-base-de-datos)** | [Consultas y transacciones](#consultas-y-transacciones) · [Query builder tipado](#query-builder-tipado) · [Migraciones](#migraciones-en-c) · [Soft deletes y timestamps](#soft-deletes-y-timestamps) · [Multi-tenancy](#multi-tenancy) · [`Mapper<T>`](#y-si-quieres-mappert-puedes) |
+| **[La base de datos](#la-base-de-datos)** | [Consultas y transacciones](#consultas-y-transacciones) · [Query builder tipado](#query-builder-tipado) · [Joins](#joins) · [Migraciones](#migraciones-en-c) · [Soft deletes y timestamps](#soft-deletes-y-timestamps) · [Multi-tenancy](#multi-tenancy) · [`Mapper<T>`](#y-si-quieres-mappert-puedes) |
 | **[Seguridad](#seguridad)** | [Middleware y políticas](#middleware-autenticación-y-políticas) · [Permisos finos](#permisos-finos) · [Tokens de otro proveedor](#tokens-de-otro-proveedor) · [Rate limiting](#rate-limiting) · [Reintentos seguros](#reintentos-seguros) · [Auditoría](#auditoría) |
 | **[Fuera de la petición](#fuera-de-la-petición)** | [Colas de trabajos](#colas-de-trabajos) · [Tareas periódicas](#tareas-periódicas) · [Cache](#cache) · [Llamar a otra API](#llamar-a-otra-api) |
 | **[Operación](#operación)** | [Configuración](#configuración) · [Configuración tipada](#configuración-tipada) · [Trazabilidad](#trazabilidad) · [Salud](#salud) · [Métricas](#métricas) · [OpenAPI](#openapi-automático) · [Recarga al guardar](#recarga-al-guardar) |
@@ -650,7 +650,58 @@ Cuatro cosas que lo separan de escribir el `SELECT`:
 - **El dialecto lo pone Syrax.** Postgres numera los parámetros (`$1, $2`) y SQLite usa `?`; el motor sale del `.env`, así que la misma consulta vale en los dos.
 - **Un `enum class` vale como valor y como campo.** La columna guarda el entero y el struct guarda los nombres: `where(&Invoice::status, "=", Status::Paid)` enlaza el tipo subyacente, y al leer la fila vuelve a ser `Status`.
 
-**Lo que no hace, a propósito: joins, relaciones, subconsultas, `GROUP BY`.** Ahí un query builder deja de tener fondo y acaba siendo un dialecto de SQL peor que SQL. Para eso `db::query` sigue donde estaba, y las dos formas conviven en el mismo repositorio —de hecho el que genera `syrax new` usa una para lo simple y la otra para lo que no lo es.
+**Para unir con otra tabla está [`join`](#joins).** Lo que no hace, a propósito: **relaciones**, subconsultas y `GROUP BY`. Ahí un query builder deja de tener fondo y acaba siendo un dialecto de SQL peor que SQL. Para eso `db::query` sigue donde estaba, y las dos formas conviven en el mismo repositorio —de hecho el que genera `syrax new` usa una para lo simple y la otra para lo que no lo es.
+
+### Joins
+
+Dos tablas, y de vuelta el struct plano que declares:
+
+```cpp
+struct PostConAutor {
+    std::int64_t id;
+    std::string  title;
+    std::string  author;
+};
+
+co_await syrax::Query<Post>()
+    .join<User>(&Post::authorId, &User::id)
+    .where(&Post::published, "=", true)
+    .orderBy(&Post::id)
+    .get<PostConAutor>(&Post::id, &Post::title, &User::name);
+```
+
+```sql
+SELECT "posts"."id" AS "id", "posts"."title" AS "title", "users"."name" AS "author"
+FROM "posts" INNER JOIN "users" ON "users"."id" = "posts"."author_id"
+WHERE "posts"."published" = $1 ORDER BY "posts"."id" ASC
+```
+
+No hay ni un string de por medio. La clave es que `&User::name` **ya sabe que su tabla es `users`** —el puntero a miembro lleva su clase dentro—, así que calificar las columnas sale gratis y una columna de una tabla que no está en el join no compila.
+
+Los alias salen de los campos del struct de vuelta, **por posición**: tres campos, tres columnas. Si sobra o falta una, no compila. `leftJoin` conserva las filas sin pareja.
+
+Cuatro cosas que lo separan de escribir el `JOIN`:
+
+- **Los borrados de las dos tablas se filtran solos.** Si sólo se filtrara la tabla base, unir contra una fila con `deleted_at` la devolvería por la puerta de atrás. En un `leftJoin` el mismo predicado conserva la fila sin pareja, porque ahí el lado derecho viene entero a `NULL`.
+- **El tenant también, y olvidarlo lanza.** En un join el riesgo es mayor, no menor: basta que se escape **una** de las dos tablas para servirle a un cliente los datos de otro.
+- **`join()` va antes que los filtros**, y si no, lanza diciéndolo. Los `where` de `Query<T>` se escriben sin calificar —con una sola tabla no hace falta—, y reescribirlos al aparecer la segunda sería adivinar.
+- **`count()` cuenta filas del join**, que no es lo mismo que contar filas de la tabla base.
+
+**No hay `paginate()`, y es lo mismo que no haya relaciones.** Un `LIMIT 20` sobre un join corta **filas**: si una fila base tiene varias unidas, pides 20 posts y te vuelven menos de 20 posts, y el `count(*)` contaría lo mismo, así que `total` y `pages` mentirían. Lo correcto es paginar la tabla base con `Query<T>::paginate` y traer lo unido de esa página.
+
+Y se planta en **dos tablas**. Con tres hay que decidir el orden del join y qué se une con qué, y eso ya es un planificador.
+
+**Esto no son relaciones.** Devuelve filas planas, como SQL. Para anidar —un `User` con su `vector<Post>` dentro— hacen falta dos consultas y un mapa en memoria, que es exactamente lo que hace por dentro un *eager load*:
+
+```cpp
+const auto users = co_await Query<User>().orderBy(&User::id).get();
+
+std::vector<std::int64_t> ids;
+for (const auto& u : users) ids.push_back(u.id);
+const auto posts = co_await Query<Post>().whereIn(&Post::authorId, ids).get();
+```
+
+Dos consultas fijas, no importa cuántos usuarios haya. Eso es el N+1 resuelto, sin identity map.
 
 ### Migraciones en C++
 
@@ -1504,7 +1555,7 @@ syrax test                     # en el repo de Syrax
 ctest --test-dir build         # equivalente
 ```
 
-355 casos cubriendo el generador de DDL en ambos dialectos, `ALTER TABLE` ejecutado contra SQLite real, el mapeo de filas a structs, el query builder contra SQLite real —SQL generado, `save`/`remove`, `update` masivo, paginación, enums, el `IN ()` vacío y que agrupar con `whereGroup` cambia qué filas vuelven—, las reglas de validación y su anotación del JSON Schema, la generación de OpenAPI, JWT y hashing de contraseñas, middlewares y políticas, la integración HTTP completa (ruteo, binding de body, 422 con detalle por campo, path params, corrutinas, el 404 y el 500 en JSON) y los WebSockets hablando el protocolo a mano contra el servidor real.
+372 casos cubriendo el generador de DDL en ambos dialectos, `ALTER TABLE` ejecutado contra SQLite real, el mapeo de filas a structs, el query builder contra SQLite real —SQL generado, `save`/`remove`, `update` masivo, paginación, enums, el `IN ()` vacío y que agrupar con `whereGroup` cambia qué filas vuelven—, las reglas de validación y su anotación del JSON Schema, la generación de OpenAPI, JWT y hashing de contraseñas, middlewares y políticas, la integración HTTP completa (ruteo, binding de body, 422 con detalle por campo, path params, corrutinas, el 404 y el 500 en JSON) y los WebSockets hablando el protocolo a mano contra el servidor real.
 
 CI en GitHub Actions, en cada push y PR:
 
@@ -1538,16 +1589,15 @@ Las digo aquí en vez de que las descubras tú:
 ## No-objetivos
 
 ```
-Joins y relaciones  Scheduler / cron    Service discovery
-Lazy / eager load   Event bus           Load balancing
-Mail                gRPC                Circuit breakers
-                    Storage / S3        Broker de sockets
-                    Drivers de cache
+Relaciones          Event bus           Service discovery
+Lazy / eager load   gRPC                Load balancing
+Mail                Storage / S3        Circuit breakers
+                    Drivers de cache    Broker de sockets
 ```
 
 Syrax compone; no reemplaza. Si tu proyecto necesita algo de esto, tómalo de una librería existente.
 
-**Regla de admisión:** una feature entra sólo si hace *notablemente más fácil crear una API*, y si es superficie finita. Una cola lo es: encolar, sacar, ejecutar, reintentar, rendirse y diferir. Con cadenas, lotes y colas con rate limit deja de serlo, y por eso no están. Un schema builder es finito (11 tipos de columna por 3 dialectos). Un query builder sin joins también: filtrar, ordenar, paginar, guardar y borrar. Con relaciones —lazy loading, cascadas, el N+1— deja de serlo, y por eso `Query<T>` se planta justo ahí.
+**Regla de admisión:** una feature entra sólo si hace *notablemente más fácil crear una API*, y si es superficie finita. Una cola lo es: encolar, sacar, ejecutar, reintentar, rendirse y diferir. Con cadenas, lotes y colas con rate limit deja de serlo, y por eso no están. Un schema builder es finito (11 tipos de columna por 3 dialectos). Un query builder sin relaciones también: filtrar, ordenar, paginar, guardar, borrar y unir dos tablas. Con relaciones —lazy loading, cascadas, el N+1— deja de serlo, y por eso se planta justo ahí.
 
 ---
 
@@ -1557,13 +1607,13 @@ Syrax compone; no reemplaza. Si tu proyecto necesita algo de esto, tómalo de un
 ┌──────────────────────────────────────────────────┐
 │  Tu aplicación                                   │
 ├──────────────────────────────────────────────────┤
-│  SYRAX  ← ~9250 lineas en 29 cabeceras           │
+│  SYRAX  ← ~9600 lineas en 29 cabeceras           │
 │                                                  │
 │  Ruteo con deducción de tipos desde la firma     │
 │  Binding request → struct, y reglas por campo    │
 │  Errores → respuesta JSON uniforme               │
 │  Mapeo fila de BD → struct, por reflection       │
-│  Query builder tipado sobre ese mismo struct     │
+│  Query builder y joins sobre ese mismo struct    │
 │  Schema builder y migraciones, en los 3 motores  │
 │  Configuracion y cache en Redis                  │
 │  Colas de trabajos, en base de datos o Redis     │

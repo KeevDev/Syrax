@@ -123,12 +123,23 @@ bool managedColumn(const std::string& key) {
     return false;
 }
 
+// Como columnOf esta templado por la clase DUEÑA del miembro, &User::name ya
+// sabe que su tabla es "users". Calificar sale gratis, y es lo que permite que
+// un join no tenga que pedirle al usuario ni un alias ni un string.
+template <typename C, typename M>
+std::string qualified(M C::*member);
+
 template <typename T>
 std::string tableOf() {
     static_assert(HasTable<T>,
                   "syrax: el modelo necesita `static constexpr auto table = \"...\";` "
                   "para usar Query<T>. Con SQL a mano (db::query) no hace falta.");
     return std::string{T::table};
+}
+
+template <typename C, typename M>
+std::string qualified(M C::*member) {
+    return "\"" + tableOf<C>() + "\".\"" + columnOf(member) + "\"";
 }
 
 template <typename T>
@@ -198,6 +209,11 @@ struct Page {
     bool           hasMore = false;
 };
 
+// Una consulta sobre dos tablas. Se construye con Query<T>::join(); la
+// definicion esta debajo de Query, que es donde se lee.
+template <typename T, typename U>
+class Join;
+
 // Construye SELECT / UPDATE / DELETE / COUNT sobre un struct plano.
 //
 //   auto adultos = co_await Query<User>()
@@ -206,8 +222,12 @@ struct Page {
 //       .limit(10)
 //       .get();
 //
-// Deliberadamente NO hay joins ni relaciones: ahi un query builder deja de
-// tener fondo. Para eso, SQL a mano con db::query, que sigue disponible.
+// Para unir con otra tabla, join() devuelve un Join<T, U> -esta debajo- que
+// trabaja sobre las dos. Lo que sigue sin haber son RELACIONES: nada de lazy
+// loading ni de un vector de hijos dentro del padre. Un join devuelve filas
+// planas, como SQL; anidarlas exige agrupar N filas en un objeto, y ahi
+// empieza el ORM. Para eso, dos consultas y un mapa, o SQL a mano con
+// db::query, que sigue disponible.
 template <typename T>
 class Query {
 public:
@@ -262,6 +282,28 @@ public:
 
     template <typename F>
     Query& orWhereGroup(F&& build) { return group("OR", std::forward<F>(build)); }
+
+    // --- unir con otra tabla ---
+
+    // Pasa a una consulta de DOS tablas, que devuelve el struct que declares.
+    //
+    //   Query<Post>().join<User>(&Post::authorId, &User::id)
+    //                .get<PostConAutor>(&Post::id, &Post::title, &User::name);
+    //
+    // Va ANTES que los filtros, y no es capricho: los where de Query<T> se
+    // escriben sin calificar -no hace falta, hay una sola tabla-, y en cuanto
+    // hay dos, un "id" a secas es ambiguo para el motor. En vez de reescribir
+    // lo ya acumulado, que seria adivinar, esto lo dice.
+    template <typename U, typename CT, typename MT, typename CU, typename MU>
+    Join<T, U> join(MT CT::*local, MU CU::*foreign) const {
+        return startJoin<U>(Join<T, U>::Kind::Inner, local, foreign);
+    }
+
+    // Conserva las filas de T que no tienen pareja en U.
+    template <typename U, typename CT, typename MT, typename CU, typename MU>
+    Join<T, U> leftJoin(MT CT::*local, MU CU::*foreign) const {
+        return startJoin<U>(Join<T, U>::Kind::Left, local, foreign);
+    }
 
     // --- orden y paginacion ---
 
@@ -463,6 +505,25 @@ public:
 private:
     drogon::orm::DbClientPtr target() const { return client_ ? client_ : db::client(); }
 
+    template <typename U, typename K, typename CT, typename MT, typename CU, typename MU>
+    Join<T, U> startJoin(K kind, MT CT::*local, MU CU::*foreign) const {
+        static_assert(std::is_same_v<CT, T>,
+                      "syrax: la columna local del join tiene que ser de la tabla de esta "
+                      "consulta.");
+        static_assert(std::is_same_v<CU, U>,
+                      "syrax: la columna foranea tiene que ser de la tabla con la que se une.");
+
+        if (!where_.empty() || !order_.empty() || limit_ || offset_ || !sets_.empty()) {
+            throw std::runtime_error(
+                "syrax: join() va antes que los filtros. Con dos tablas en juego, una columna "
+                "sin calificar es ambigua, y reescribir lo que ya se acumulo seria adivinar. "
+                "Mueve el .join<U>(...) justo detras del Query<T>().");
+        }
+
+        return Join<T, U>{client_, kind,
+                          detail::qualified(foreign) + " = " + detail::qualified(local)};
+    }
+
     // Los parametros de un grupo continuan la numeracion del padre, no
     // empiezan de cero: por eso el indice no es solo params_.size().
     std::string slot(std::size_t ahead = 0) const {
@@ -651,6 +712,307 @@ private:
     std::vector<Assignment>          sets_;
     std::size_t                      paramBase_ = 0;
     Trashed                          trashed_   = Trashed::Without;
+};
+
+// ----------------------------------------------------------------- Join
+
+// Una consulta sobre DOS tablas, que devuelve el struct plano que tu declares.
+//
+//   struct PostConAutor {
+//       std::int64_t id;
+//       std::string  title;
+//       std::string  author;
+//   };
+//
+//   co_await Query<Post>()
+//       .join<User>(&Post::authorId, &User::id)
+//       .where(&Post::published, "=", true)
+//       .get<PostConAutor>(&Post::id, &Post::title, &User::name);
+//
+//   SELECT "posts"."id" AS "id", "posts"."title" AS "title",
+//          "users"."name" AS "author"
+//   FROM "posts" INNER JOIN "users" ON "users"."id" = "posts"."author_id"
+//   WHERE "posts"."published" = $1
+//
+// Los alias salen de los campos del struct de vuelta, POR POSICION: tres
+// campos, tres columnas. Si sobra o falta una, no compila. Si escribes
+// &User::nmae, tampoco. No hay ni un string de por medio.
+//
+// **Esto no son relaciones, y la diferencia importa.** Devuelve filas planas,
+// como las devuelve SQL. No hay lazy loading, ni identity map, ni un vector de
+// hijos dentro del padre: eso exige agrupar N filas en un objeto, y ahi empieza
+// el ORM. Para anidar, dos consultas y un mapa en memoria -esta en el README-,
+// que ademas es lo que hace por dentro un eager load.
+//
+// **Y por eso no hay paginate().** Un LIMIT sobre un join corta FILAS, no
+// filas de la tabla base: pides 20 posts con su autor y si un post tuviera
+// varias filas unidas te vuelven menos de 20 posts. El count(*) contaria lo
+// mismo, asi que `total` y `pages` mentirian. Lo correcto es paginar la tabla
+// base con Query<T>::paginate y luego traer lo unido de esa pagina.
+//
+// Dos tablas y se planta. Con tres ya hace falta decidir el orden del join y
+// que se une con que, y eso es un planificador.
+template <typename T, typename U>
+class Join {
+public:
+    enum class Kind { Inner, Left };
+
+    Join(drogon::orm::DbClientPtr on, Kind kind, std::string onClause)
+        : client_{std::move(on)}, kind_{kind}, on_{std::move(onClause)} {}
+
+    // --- filtros, sobre cualquiera de las dos tablas ---
+
+    template <typename C, typename M, typename V>
+    Join& where(M C::*member, std::string op, V value) {
+        belongs<C>();
+        return condition("AND", detail::qualified(member), std::move(op), std::move(value));
+    }
+
+    template <typename C, typename M, typename V>
+    Join& orWhere(M C::*member, std::string op, V value) {
+        belongs<C>();
+        return condition("OR", detail::qualified(member), std::move(op), std::move(value));
+    }
+
+    template <typename C, typename M, typename V>
+    Join& whereIn(M C::*member, std::vector<V> values) {
+        belongs<C>();
+        return inList(detail::qualified(member), std::move(values));
+    }
+
+    template <typename C, typename M, typename V>
+    Join& whereIn(M C::*member, std::initializer_list<V> values) {
+        return whereIn(member, std::vector<V>{values});
+    }
+
+    template <typename C, typename M>
+    Join& whereNull(M C::*member) {
+        belongs<C>();
+        return bare("AND", detail::qualified(member) + " IS NULL");
+    }
+
+    template <typename C, typename M>
+    Join& whereNotNull(M C::*member) {
+        belongs<C>();
+        return bare("AND", detail::qualified(member) + " IS NOT NULL");
+    }
+
+    template <typename C, typename M>
+    Join& orderBy(M C::*member, Dir direction = Dir::Asc) {
+        belongs<C>();
+        if (!order_.empty()) order_ += ", ";
+        order_ += detail::qualified(member) + (direction == Dir::Desc ? " DESC" : " ASC");
+        return *this;
+    }
+
+    Join& limit(std::size_t count)  { limit_  = count;  return *this; }
+    Join& offset(std::size_t count) { offset_ = count;  return *this; }
+
+    // Un solo tenant para las dos tablas: una consulta pertenece a un cliente,
+    // no a dos. Si solo una de las dos lo declara, solo esa se filtra.
+    Join& forTenant(std::string id) {
+        static_assert(detail::Tenant<T> || detail::Tenant<U>,
+                      "syrax: forTenant() necesita que alguna de las dos tablas declare "
+                      "`static constexpr auto tenant = true;`.");
+        tenant_ = std::move(id);
+        return *this;
+    }
+
+    // --- ejecucion ---
+
+    // Las columnas van en el orden de los campos del struct de vuelta.
+    template <typename R, typename... Cols>
+    drogon::Task<std::vector<R>> get(Cols... cols) const {
+        requireTenant();
+        const auto result = co_await detail::run(target(), select<R>(cols...), bound());
+
+        std::vector<R> rows;
+        rows.reserve(result.size());
+        for (const auto& row : result) rows.push_back(db::fromRow<R>(row));
+        co_return rows;
+    }
+
+    template <typename R, typename... Cols>
+    drogon::Task<std::optional<R>> first(Cols... cols) const {
+        Join copy{*this};
+        copy.limit_ = 1;
+
+        const auto rows = co_await copy.template get<R>(cols...);
+        if (rows.empty()) co_return std::nullopt;
+        co_return rows.front();
+    }
+
+    // Cuenta FILAS del join, que en un join de varios no es lo mismo que
+    // contar filas de la tabla base. Para eso, Query<T>().count().
+    drogon::Task<std::int64_t> count() const {
+        requireTenant();
+        const auto sql = "SELECT count(*) FROM \"" + detail::tableOf<T>() + "\" " +
+                         keyword() + " \"" + detail::tableOf<U>() + "\" ON " + on_ +
+                         whereClause();
+
+        const auto result = co_await detail::run(target(), sql, bound());
+        co_return result.empty() ? 0 : result[0][0].template as<std::int64_t>();
+    }
+
+    // El SQL sin ejecutarlo, para ver que salio.
+    template <typename R, typename... Cols>
+    std::string toSql(Cols... cols) const {
+        return select<R>(cols...);
+    }
+
+private:
+    drogon::orm::DbClientPtr target() const { return client_ ? client_ : db::client(); }
+
+    // El puntero a miembro trae su clase dueña, asi que una columna de una
+    // tabla que no esta en el join no compila en vez de generar un SQL que el
+    // motor rechaza a mitad de la noche.
+    template <typename C>
+    static void belongs() {
+        static_assert(std::is_same_v<C, T> || std::is_same_v<C, U>,
+                      "syrax: esa columna no es de ninguna de las dos tablas del join. "
+                      "Un join de tres tablas no entra: haz dos consultas.");
+    }
+
+    const char* keyword() const { return kind_ == Kind::Left ? "LEFT JOIN" : "INNER JOIN"; }
+
+    std::string slot(std::size_t ahead = 0) const {
+        return detail::placeholder(params_.size() + ahead + 1);
+    }
+
+    template <typename V>
+    Join& condition(const char* join, std::string column, std::string op, V value) {
+        push(join, column + " " + op + " " + slot());
+        params_.push_back(detail::binder(std::move(value)));
+        return *this;
+    }
+
+    template <typename V>
+    Join& inList(std::string column, std::vector<V> values) {
+        // Igual que en Query: un IN vacio no es SQL valido, y "no coincide con
+        // nada" es la lectura correcta.
+        if (values.empty()) return bare("AND", "1 = 0");
+
+        std::string slots;
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            if (i) slots += ", ";
+            slots += slot(i);
+        }
+        push("AND", column + " IN (" + slots + ")");
+
+        for (auto& value : values) params_.push_back(detail::binder(std::move(value)));
+        return *this;
+    }
+
+    Join& bare(const char* join, std::string expression) {
+        push(join, std::move(expression));
+        return *this;
+    }
+
+    void push(const char* join, std::string expression) {
+        if (!where_.empty()) where_ += std::string{" "} + join + " ";
+        where_ += std::move(expression);
+    }
+
+    // El mismo guardia que en Query, y por el mismo motivo: servirle a un
+    // cliente los datos de otro es el fallo que esto no se puede permitir. En
+    // un join el riesgo es mayor, no menor: basta que se escape UNA de las dos.
+    void requireTenant() const {
+        if constexpr (detail::Tenant<T> || detail::Tenant<U>) {
+            if (!tenant_) {
+                throw std::runtime_error(
+                    "syrax: el join entre '" + detail::tableOf<T>() + "' y '" +
+                    detail::tableOf<U>() +
+                    "' no dice de que tenant es. Alguna de las dos declara `tenant`, asi que "
+                    "hay que llamar a forTenant(id) antes de ejecutarlo.");
+            }
+        }
+    }
+
+    // Anade el predicado de una tabla al WHERE, siempre entre parentesis: sin
+    // ellos un filtro con OR se combinaria mal y devolveria justo las filas que
+    // estos predicados existen para esconder.
+    static void andAlso(std::string& clause, const std::string& extra) {
+        if (extra.empty()) return;
+        clause = clause.empty() ? extra : "(" + clause + ") AND " + extra;
+    }
+
+    std::string whereClause() const {
+        std::string clause = where_;
+
+        // Los borrados de las DOS tablas. Si se filtrara solo la base, un join
+        // contra una fila borrada la resucitaria por la puerta de atras.
+        if constexpr (detail::SoftDeletes<T>) {
+            andAlso(clause, "\"" + detail::tableOf<T>() + "\".\"" +
+                                std::string{detail::kDeletedAt} + "\" IS NULL");
+        }
+        if constexpr (detail::SoftDeletes<U>) {
+            // El mismo predicado sirve para los dos tipos de join, y no por
+            // casualidad: en un LEFT JOIN sin pareja el lado derecho viene todo
+            // a NULL, asi que "deleted_at IS NULL" tambien es cierto ahi y la
+            // fila sin pareja -que es legitima- se conserva.
+            andAlso(clause, "\"" + detail::tableOf<U>() + "\".\"" +
+                                std::string{detail::kDeletedAt} + "\" IS NULL");
+        }
+
+        if (tenant_) {
+            if constexpr (detail::Tenant<T>) {
+                andAlso(clause, "\"" + detail::tableOf<T>() + "\".\"" +
+                                    std::string{detail::kTenantId} + "\" = " +
+                                    detail::placeholder(params_.size() + 1));
+            }
+            if constexpr (detail::Tenant<U>) {
+                const auto ahead = detail::Tenant<T> ? 2 : 1;
+                andAlso(clause, "\"" + detail::tableOf<U>() + "\".\"" +
+                                    std::string{detail::kTenantId} + "\" = " +
+                                    detail::placeholder(params_.size() + ahead));
+            }
+        }
+        return clause.empty() ? std::string{} : " WHERE " + clause;
+    }
+
+    std::vector<detail::ParamBinder> bound() const {
+        auto out = params_;
+        if (tenant_) {
+            if constexpr (detail::Tenant<T>) out.push_back(detail::binder(*tenant_));
+            if constexpr (detail::Tenant<U>) out.push_back(detail::binder(*tenant_));
+        }
+        return out;
+    }
+
+    template <typename R, typename... Cols>
+    std::string select(Cols... cols) const {
+        static_assert(sizeof...(Cols) == glz::reflect<R>::size,
+                      "syrax: el join pide una columna por campo del struct de vuelta, en el "
+                      "mismo orden. Si sobran o faltan, el mapeo seria adivinar.");
+
+        constexpr auto keys = glz::reflect<R>::keys;
+
+        std::string  list;
+        std::size_t  i = 0;
+        ((list += (i ? ", " : "") + detail::qualified(cols) + " AS \"" +
+                  std::string{keys[i]} + "\"",
+          ++i),
+         ...);
+
+        std::string sql = "SELECT " + list + " FROM \"" + detail::tableOf<T>() + "\" " +
+                          keyword() + " \"" + detail::tableOf<U>() + "\" ON " + on_ +
+                          whereClause();
+
+        if (!order_.empty())     sql += " ORDER BY " + order_;
+        if (limit_.has_value())  sql += " LIMIT " + std::to_string(*limit_);
+        if (offset_.has_value()) sql += " OFFSET " + std::to_string(*offset_);
+        return sql;
+    }
+
+    drogon::orm::DbClientPtr         client_;
+    Kind                             kind_;
+    std::string                      on_;
+    std::string                      where_;
+    std::string                      order_;
+    std::optional<std::size_t>       limit_;
+    std::optional<std::size_t>       offset_;
+    std::optional<std::string>       tenant_;
+    std::vector<detail::ParamBinder> params_;
 };
 
 // --------------------------------------------------------- persistencia

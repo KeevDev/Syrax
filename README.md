@@ -97,7 +97,7 @@ Con `--auth`, el `.env` y `config.hpp` quedan cableados de verdad y `middleware.
 | **[Fuera de la petición](#fuera-de-la-petición)** | [Colas de trabajos](#colas-de-trabajos) · [Tareas periódicas](#tareas-periódicas) · [Cache](#cache) · [Llamar a otra API](#llamar-a-otra-api) |
 | **[Operación](#operación)** | [Configuración](#configuración) · [Configuración tipada](#configuración-tipada) · [Trazabilidad](#trazabilidad) · [Salud](#salud) · [Métricas](#métricas) · [OpenAPI](#openapi-automático) · [Recarga al guardar](#recarga-al-guardar) |
 | **Tu proyecto** | [Estructura](#estructura-de-un-proyecto) · [Tests](#tests-en-tu-proyecto) · [Comandos](#comandos) |
-| **El framework** | [Tests y CI](#tests-y-ci) · [Limitaciones conocidas](#limitaciones-conocidas) · [No-objetivos](#no-objetivos) · [Cómo funciona](#cómo-funciona) |
+| **El framework** | [Tests y CI](#tests-y-ci) · [Limitaciones conocidas](#limitaciones-conocidas) · [Lo que falta](#lo-que-falta) · [Cómo funciona](#cómo-funciona) |
 
 ---
 
@@ -1040,7 +1040,7 @@ Tres cosas que separan verificar de fingir que se verifica:
 - **Un `kid` desconocido fuerza una recarga, pero con freno.** Los proveedores rotan claves y sin recarga el día de la rotación no entra nadie; recargando en cada fallo, cualquiera tumba tu API mandando tokens con `kid` inventado.
 - **`issuer` y `audience` se comprueban.** Un token de otro cliente del mismo proveedor está perfectamente firmado; lo que dice que no es para ti es el `aud`.
 
-*Ser* el proveedor no entra — discovery, PKCE, refresh, cuatro flujos y sus modos de fallo — y el motivo está en los no-objetivos.
+*Ser* el proveedor todavía no —discovery, PKCE, refresh, cuatro flujos y sus modos de fallo—, y lo que haría falta para eso está en [lo que falta](#lo-que-falta).
 
 ### Rate limiting
 
@@ -1200,7 +1200,7 @@ Si el `COMMIT` falla, el job **tampoco existe**. Con Redis son dos sistemas dist
 
 ### Tareas periódicas
 
-Era no-objetivo mientras no había colas. Lo que cambia con la cola es que ya existe el sitio donde poner el trabajo: el scheduler no ejecuta nada, **encola**, y a partir de ahí la tarea es un job como los demás, con sus reintentos y su registro de fallos.
+Estuvo en *lo que falta* mientras no había colas. Lo que cambia con la cola es que ya existe el sitio donde poner el trabajo: el scheduler no ejecuta nada, **encola**, y a partir de ahí la tarea es un job como los demás, con sus reintentos y su registro de fallos.
 
 ```cpp
 // src/bootstrap/schedule.cpp
@@ -1669,7 +1669,11 @@ Las digo aquí en vez de que las descubras tú:
 
 ---
 
-## No-objetivos
+## Lo que falta
+
+El objetivo es un framework completo, y a la larga uno que no dependa de otro
+—lo que eso costaría está medido en [docs/SIN-DROGON.md](docs/SIN-DROGON.md)—.
+Esto es lo que todavía no está:
 
 ```
 Lazy loading        Event bus           Service discovery
@@ -1678,9 +1682,29 @@ Cascadas al borrar  Storage / S3        Circuit breakers
 Mail                Drivers de cache    Broker de sockets
 ```
 
-Syrax compone; no reemplaza. Si tu proyecto necesita algo de esto, tómalo de una librería existente.
+**Ninguna es un "nunca".** Son las que hoy salen caras, y el porqué de cada una
+está en [el roadmap](docs/ROADMAP.md). Mientras tanto, para cualquiera de ellas
+hay una librería que la hace bien y Syrax no estorba.
 
-**Regla de admisión:** una feature entra sólo si hace *notablemente más fácil crear una API*, y si es superficie finita. Una cola lo es: encolar, sacar, ejecutar, reintentar, rendirse y diferir. Con cadenas, lotes y colas con rate limit deja de serlo, y por eso no están. Un schema builder es finito (11 tipos de columna por 3 dialectos). Un query builder sin lazy loading también: filtrar, ordenar, paginar, guardar, borrar, unir dos tablas y traerse los hijos en dos consultas. Con lazy loading deja de serlo —el número de consultas pasa a depender de los datos—, y por eso se planta justo ahí.
+Que algo esté aquí no es permanente: las **tareas periódicas** estuvieron en
+esta lista hasta que existieron las colas, y entonces cupieron en veinte líneas
+porque ya había dónde poner el trabajo. Lo mismo pasó con los **joins** y las
+**relaciones**, que salieron de aquí en cuanto se vio dónde plantarse —dos
+tablas, dos consultas, sin lazy—.
+
+**Qué entra antes:** lo que hace *notablemente más fácil crear una API* y tiene
+superficie finita — porque una feature sin frontera no se termina nunca, y
+media feature es peor que ninguna.
+
+Una cola la tiene: encolar, sacar, ejecutar, reintentar, rendirse y diferir. Con
+cadenas, lotes y colas con rate limit se pierde, y por eso esa parte todavía no
+está. Un schema builder también (11 tipos de columna por 3 dialectos). Y un
+query builder sin lazy loading: filtrar, ordenar, paginar, guardar, borrar, unir
+dos tablas y traerse los hijos en dos consultas.
+
+Con lazy loading la frontera desaparece —el número de consultas pasa a depender
+de los datos— y por eso ahí se paró. No porque no haga falta: porque todavía no
+se ve dónde acaba.
 
 ---
 

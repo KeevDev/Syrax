@@ -101,21 +101,32 @@ No queda nada. Lo que había está arriba, en *Hecho*; lo que se descartó y por
 qué, abajo. Cuando aparezca algo nuevo que pase la regla de admisión, aquí es
 donde va antes de escribirse.
 
-## Nivel 3 — se quedan fuera, y por qué
+## Nivel 3 — lo que falta, y por qué sale caro
 
-Agrupados por la razón, que es más útil que una lista plana.
+**Todo lo de aquí es objetivo.** Ninguna es un "nunca": el plan es un framework
+completo, y a la larga uno que no dependa de otro. Lo que esta lista dice no es
+qué se descarta, sino **qué hay que resolver antes** de que cada cosa pueda
+entrar sin quedarse a medias.
 
-### Es infraestructura, no framework
+Agrupadas por lo que las hace caras, que es más útil que una lista plana y es lo
+que decide el orden.
 
-| Qué | Por qué no |
+El precedente está arriba, en *Hecho*: las **tareas periódicas** vivieron en
+este nivel hasta que existieron las colas —entonces ya había dónde poner el
+trabajo y cupieron en veinte líneas—, y los **joins** y las **relaciones**
+salieron de aquí en cuanto se vio dónde plantarse.
+
+### Depende de algo que el proceso no controla
+
+| Qué | Qué hay que resolver antes |
 |---|---|
 | **API Gateway**, **Service Discovery** | Eso lo resuelve el despliegue —Kubernetes, Traefik, Consul— y lo resuelve mejor, porque ve todas las instancias. Un framework sólo ve el proceso en el que vive. |
 | **Circuit Breaker**, **Bulkhead** | Pertenecen al cliente HTTP concreto o a la malla de servicios. Y mal ajustados son peligrosos: un breaker que abre antes de tiempo convierte una degradación parcial en una caída total. |
 | **Comunicación entre microservicios** | No es una feature, es una decisión de arquitectura. Lo que Syrax sí puede aportar son las piezas: un cliente HTTP con timeouts y reintentos, y el outbox, que ya está. |
 
-### La superficie no es finita
+### La superficie todavía no tiene frontera
 
-| Qué | Por qué no |
+| Qué | Qué hay que resolver antes |
 |---|---|
 | **RabbitMQ**, **Kafka**, **SQS** | Cada uno es un SDK entero con su propio modelo: exchanges y bindings, particiones y offsets, visibility timeouts. Y **Kafka no es una cola, es un log**: forzarlo a las seis operaciones de `jobs::Driver` sería mentir sobre lo que hace. El día que necesitas Kafka de verdad, quieres Kafka, no la idea que Syrax se hizo de Kafka. |
 | **OAuth2**, **OIDC** (como proveedor) | Son especificaciones, no features: discovery, JWKS, rotación de claves, PKCE, refresh, cuatro flujos y sus modos de fallo. La mitad finita —*validar* un token ajeno— **ya está hecha**, en `jwks.hpp`. Ser el proveedor, no. |
@@ -123,13 +134,13 @@ Agrupados por la razón, que es más útil que una lista plana.
 | **Feature modules instalables** | Es un gestor de paquetes: resolución de versiones, dependencias entre módulos, puntos de extensión estables. Eso ya es CMake y FetchContent. |
 | **Capa de idiomas (i18n)** | Para una API el mensaje traducido casi siempre lo pone el cliente, que es quien sabe el idioma del usuario. Y **el `code` estable de la capa de errores es justo lo que lo hace innecesario**: el servidor manda `saldo_insuficiente` y el cliente decide cómo se dice. |
 
-### Se solapa con algo que ya existe
+### Habría dos formas de hacer lo mismo
 
-| Qué | Por qué no |
+| Qué | Qué hay que resolver antes |
 |---|---|
 | **Events + Event Bus** | Es lo que hacen las colas, con otro vocabulario. Dos formas de hacer lo mismo es peor que una: nadie sabe cuál usar y las dos se quedan a medias. |
 | **Webhooks** | Un webhook es un POST con reintentos y una firma HMAC. Los reintentos son un job, y `hmacSha256` ya está en `auth.hpp`. Merece **una receta en el README**, no una feature. |
-| **Relaciones en `Query<T>`** | Ahí es exactamente donde el query builder deja de ser finito. Ya está razonado en el README. |
+| **Lazy loading**, **identity map**, **cascadas** | Las relaciones de un nivel ya entraron: `with<U>()` trae los hijos en dos consultas fijas y `relations` las declara en el modelo. Lo que falta es lo que no tiene frontera: con lazy, el número de consultas pasa a depender de los datos —el N+1—, y anidar dos niveles ya es un planificador. Las cascadas, mientras tanto, las hace mejor un `ON DELETE CASCADE`, que también vale cuando el borrado viene de fuera de la app. |
 | **Storage / S3**, **Mail** | Firmas, multipart, reintentos, TLS, adjuntos, rebotes. **Pero** el mail es el caso de libro de una interfaz —`Mailer` con `SmtpMailer` y `LogMailer`—, así que si algún día entra un puerto de ejemplo en el andamiaje, que sea éste y no un `IUserRepository`. |
 
 ---

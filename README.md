@@ -887,7 +887,7 @@ co_await syrax::Query<Factura>().forTenant(actor.tenant).get();
 
 **Olvidar el `forTenant` lanza.** Es la decisión central: el fallo que esta feature no se puede permitir es servirle a un cliente los datos de otro, y con el tenant pasándose a mano basta olvidarlo una vez en un repositorio para que pase, en silencio y en producción. Un error ruidoso en la primera prueba convierte un fallo de seguridad en uno de programación normal.
 
-Se pasa explícito y no por un contexto implícito porque **con corrutinas no hay contexto por petición fiable**: un `co_await` reanuda en otro hilo, y un `thread_local` ahí no da un error, da los datos del tenant equivocado de vez en cuando. Es la misma trampa que documenta el apartado de inyección de dependencias.
+Se pasa explícito y no por un contexto implícito porque **con corrutinas no hay contexto por petición fiable**: un `co_await` reanuda en otro hilo, y un `thread_local` ahí no da un error, da los datos del tenant equivocado de vez en cuando. Es la misma razón por la que Syrax no tiene inyección de dependencias con scope por petición: no hay dónde apoyarla.
 
 Sólo el modelo **por fila**: el de esquema y el de base por tenant son decisiones que no se pueden desandar, y un framework no debería elegirlas por ti.
 

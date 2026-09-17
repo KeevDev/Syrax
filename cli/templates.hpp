@@ -258,7 +258,7 @@ QUEUE_RETRY_AFTER=90
 
 # Cache en Redis. Apagado hasta que lo necesites: sin esto la app no
 # intenta conectarse a ningun Redis.
-CACHE_ENABLED=false
+CACHE_ENABLED=@CACHE@
 REDIS_HOST=127.0.0.1
 REDIS_PORT=6379
 REDIS_PASSWORD=
@@ -273,7 +273,7 @@ CORS_CREDENTIALS=false
 # por peticion.
 LOG_LEVEL=info
 LOG_ACCESS=1
-)T";
+@AUTHENV@)T";
 
 inline constexpr std::string_view kEnvMysql = R"T(# Puerto donde escucha la app. Un argumento en la linea de comandos lo pisa.
 APP_PORT=8080
@@ -301,7 +301,7 @@ QUEUE_RETRY_AFTER=90
 
 # Cache en Redis. Apagado hasta que lo necesites: sin esto la app no
 # intenta conectarse a ningun Redis.
-CACHE_ENABLED=false
+CACHE_ENABLED=@CACHE@
 REDIS_HOST=127.0.0.1
 REDIS_PORT=6379
 REDIS_PASSWORD=
@@ -316,7 +316,7 @@ CORS_CREDENTIALS=false
 # por peticion.
 LOG_LEVEL=info
 LOG_ACCESS=1
-)T";
+@AUTHENV@)T";
 
 inline constexpr std::string_view kEnvSqlite = R"T(# Puerto donde escucha la app. Un argumento en la linea de comandos lo pisa.
 APP_PORT=8080
@@ -335,7 +335,7 @@ QUEUE_RETRY_AFTER=90
 
 # Cache en Redis. Apagado hasta que lo necesites: sin esto la app no
 # intenta conectarse a ningun Redis.
-CACHE_ENABLED=false
+CACHE_ENABLED=@CACHE@
 REDIS_HOST=127.0.0.1
 REDIS_PORT=6379
 REDIS_PASSWORD=
@@ -350,7 +350,7 @@ CORS_CREDENTIALS=false
 # por peticion.
 LOG_LEVEL=info
 LOG_ACCESS=1
-)T";
+@AUTHENV@)T";
 
 inline constexpr std::string_view kCompose = R"T(# docker compose lee el .env de este directorio, asi que DB_PORT es la unica
 # fuente de verdad: la cambias ahi y la app y el contenedor quedan de acuerdo.
@@ -373,7 +373,7 @@ services:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}"]
       interval: 5s
       retries: 10
-
+@REDIS@
 volumes:
   pgdata:
 )T";
@@ -398,7 +398,7 @@ services:
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1"]
       interval: 5s
       retries: 10
-
+@REDIS@
 volumes:
   mysqldata:
 )T";
@@ -519,6 +519,7 @@ struct Config {
     std::string corsOrigins     = "*";
     bool        corsCredentials = false;
     int         rateLimit       = 120;
+@AUTHCFG@
 
     static auto rules() {
         return syrax::rules(
@@ -992,7 +993,7 @@ void middleware(syrax::App& app) {
     // peticion sigue como si la cabecera no estuviera.
     //
     //   app.idempotency();
-}
+@AUTHUSE@}
 
 }  // namespace bootstrap
 )T";

@@ -12,7 +12,9 @@
 #include <syrax/health.hpp>
 #include <syrax/http.hpp>
 #include <syrax/jobs.hpp>
+#include <syrax/jwks.hpp>
 #include <syrax/log.hpp>
+#include <syrax/metrics.hpp>
 #include <syrax/middleware.hpp>
 #include <syrax/migration.hpp>
 #include <syrax/openapi.hpp>
@@ -20,5 +22,6 @@
 #include <syrax/policy.hpp>
 #include <syrax/result.hpp>
 #include <syrax/schedule.hpp>
+#include <syrax/uploads.hpp>
 #include <syrax/validation.hpp>
 #include <syrax/ws.hpp>

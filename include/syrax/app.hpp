@@ -10,6 +10,7 @@
 #include <syrax/health.hpp>
 #include <syrax/idempotency.hpp>
 #include <syrax/log.hpp>
+#include <syrax/metrics.hpp>
 #include <syrax/middleware.hpp>
 #include <syrax/validation.hpp>
 #include <syrax/ws.hpp>
@@ -768,6 +769,33 @@ public:
         return *this;
     }
 
+    // Cuatro contadores en /metrics, en el formato de texto de Prometheus.
+    //
+    // La ruta se sirve en texto plano y no como JSON: es lo que Prometheus
+    // sabe leer, y envolverlo en el sobre de la API lo haria inutil para lo
+    // unico que existe.
+    //
+    // No cuenta sus propias peticiones. Prometheus raspa cada 15 segundos, y
+    // dejarlo contar haria que el trafico de la grafica fuera, en una API
+    // tranquila, casi todo el propio scrape.
+    App& metrics(const std::string& path = "/metrics") {
+        metricsPath_ = path;
+
+        drogon::app().registerHandler(
+            path,
+            [](const drogon::HttpRequestPtr&,
+               std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
+                auto resp = drogon::HttpResponse::newHttpResponse();
+                resp->setStatusCode(drogon::k200OK);
+                resp->setContentTypeCode(drogon::CT_TEXT_PLAIN);
+                resp->setBody(syrax::metrics::render());
+                applyResponseChain(resp);
+                cb(resp);
+            },
+            {drogon::Get});
+        return *this;
+    }
+
     // Apaga /docs y /openapi.json (por ejemplo, en produccion).
     App& withoutDocs() {
         docsEnabled_ = false;
@@ -808,6 +836,10 @@ public:
         // trazabilidad que hay que acordarse de encender es la que no esta el
         // dia que hace falta; para apagarla esta LOG_ACCESS=0.
         log::install();
+
+        // El conteo se engancha aqui y no en metrics(), para que el orden de
+        // las llamadas del proyecto no cambie lo que se mide.
+        if (!metricsPath_.empty()) installMetrics();
 
         // El banner se imprime cuando el listener ya esta arriba, no antes:
         // si el puerto esta ocupado no tiene sentido anunciar una URL que no
@@ -856,6 +888,35 @@ private:
         std::string     prefix;
         AsyncMiddleware fn;
     };
+
+    void installMetrics() {
+        const auto exenta = metricsPath_;
+
+        drogon::app().registerPreHandlingAdvice(
+            [exenta](const drogon::HttpRequestPtr& req, drogon::AdviceCallback&&,
+                     drogon::AdviceChainCallback&& next) {
+                if (req->path() != exenta) syrax::metrics::started();
+                next();
+            });
+
+        drogon::app().registerPostHandlingAdvice(
+            [exenta](const drogon::HttpRequestPtr& req, const drogon::HttpResponsePtr& resp) {
+                if (req->path() == exenta) return;
+
+                // El instante de entrada lo deja log::install(), que ya lo
+                // necesitaba para la linea de acceso: medirlo dos veces seria
+                // dos relojes que se pueden desincronizar.
+                std::uint64_t micros = 0;
+                if (req->attributes()->find(std::string{log::detail::kStartedKey})) {
+                    const auto desde = std::stoull(
+                        req->attributes()->get<std::string>(std::string{log::detail::kStartedKey}));
+                    const auto hasta = std::stoull(log::detail::micros());
+                    if (hasta > desde) micros = hasta - desde;
+                }
+
+                syrax::metrics::finished(static_cast<int>(resp->statusCode()), micros);
+            });
+    }
 
     void registerMiddlewares() {
         if (cors_) registerCors();
@@ -1023,6 +1084,7 @@ private:
     std::string            title_       = "API";
     std::string            version_     = "1.0.0";
     std::string            base_        = "/api/v1";
+    std::string            metricsPath_;
     bool                   docsEnabled_ = true;
     bool                   banner_      = true;
 

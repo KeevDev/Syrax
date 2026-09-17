@@ -74,6 +74,16 @@ La primera compilación tarda unos minutos porque baja y compila Drogon; las sig
 
 ---
 
+**`syrax new` pregunta tres cosas** si hay terminal: el motor de base, si quieres Redis para cache y colas, y qué autenticación. Cada una cambia archivos de verdad —el `docker-compose`, la conexión, el middleware, la configuración y el `.env`—, que es el único motivo por el que una pregunta merece estar ahí.
+
+```bash
+syrax new pedidos --db postgres --cache --auth jwks   # sin preguntas, para un script
+```
+
+No pregunta por `/docs`: eso cambia una línea (`app.withoutDocs()`), y una pregunta que ahorra una línea no vale duplicar las combinaciones que hay que compilar.
+
+Con `--auth`, el `.env` y `config.hpp` quedan cableados de verdad y `middleware.cpp` trae la línea exacta **comentada**. No es pereza: qué rutas protege es una decisión tuya, y un `app.use(cfg.apiBase, ...)` a ciegas protegería también el propio login.
+
 ## Qué trae
 
 ### El camino de una petición
@@ -1074,6 +1084,89 @@ Se planta ahí: **sin circuit breaker y sin descubrimiento de servicios**. El pr
 
 ---
 
+### Tokens de otro proveedor
+
+La mitad finita y útil de OAuth2/OIDC: Auth0, Keycloak, Cognito y Entra firman con RS256 y publican sus claves públicas; lo único que tiene que hacer tu API es bajarlas y comprobar la firma.
+
+```cpp
+app.useAsync(syrax::auth::jwks("https://tu-tenant.auth0.com/.well-known/jwks.json",
+                               {.issuer = "https://tu-tenant.auth0.com/",
+                                .audience = "https://api.tuempresa.com"}));
+```
+
+A partir de ahí el token es un token: `auth.sub`, `auth.role` y `auth.scope` quedan en la petición igual que con `bearer()`, y `requireScope()` funciona sobre ellos sin traducir nada.
+
+Tres cosas que separan verificar de fingir que se verifica:
+
+- **El algoritmo se exige, no se lee del token.** Un JWT dice en su propia cabecera con qué se firmó, y obedecerlo es el agujero clásico: `alg=none`, o `alg=HS256` usando la clave **pública** como secreto compartido. Aquí sólo entra RS256, y hay un test por cada uno de esos dos ataques.
+- **Un `kid` desconocido fuerza una recarga, pero con freno.** Los proveedores rotan claves y sin recarga el día de la rotación no entra nadie; recargando en cada fallo, cualquiera tumba tu API mandando tokens con `kid` inventado.
+- **`issuer` y `audience` se comprueban.** Un token de otro cliente del mismo proveedor está perfectamente firmado; lo que dice que no es para ti es el `aud`.
+
+*Ser* el proveedor no entra — discovery, PKCE, refresh, cuatro flujos y sus modos de fallo — y el motivo está en los no-objetivos.
+
+---
+
+### Archivos subidos
+
+```cpp
+const syrax::Uploads archivos{request};
+
+const auto fallos = archivos.check({
+    syrax::upload("avatar").required().maxSize(2 * 1024 * 1024).image(),
+    syrax::upload("cv").maxSize(5 * 1024 * 1024).extensions({"pdf"}).pdf(),
+});
+if (!fallos.empty()) co_return syrax::Error{422, "validation failed", "", "", fallos};
+```
+
+Devuelve `FieldError`, el mismo tipo que `validate()`, así que el 422 sale por el camino de siempre.
+
+**No hay filtro por tipo MIME, y es deliberado.** El tipo que viaja en el multipart lo declara el cliente: subir un `.php` diciendo que es `image/png` es el ataque de manual, así que un `mimes({"image/png"})` da una sensación de seguridad que no corresponde a nada. Lo que sí significa algo es `image()` y `pdf()`, que miran los **primeros bytes** del archivo — lo único que no se puede falsificar sin falsificar el contenido.
+
+**Guardar no entra.** Es elegir dónde, cómo se nombra para que dos subidas no se pisen, quién lo borra y qué pasa cuando el disco se llena. Eso es storage, y storage no es finito. El contenido está en `bytes`.
+
+---
+
+### Métricas
+
+```cpp
+app.metrics();
+```
+
+```
+syrax_requests_total 1428
+syrax_requests_failed_total 3
+syrax_request_duration_seconds_sum 9.412
+syrax_requests_in_flight 2
+```
+
+Con eso salen las tres gráficas que de verdad se miran: cuánto tráfico hay, qué porcentaje falla y cuánto se tarda de media. Un 4xx **no** cuenta como fallo: un 404 es el cliente pidiendo mal, y contarlo hace que la gráfica de errores suba cuando lo que pasa es que alguien escanea rutas.
+
+Y se planta ahí. Lo siguiente que se pide siempre es partirlo por ruta, y eso no es un contador más: `/users/42` genera una serie por usuario, y el primero que pase un bot tumba el Prometheus, no la API. Cuando hagan falta histogramas y etiquetas, lo que hace falta es `prometheus-cpp`.
+
+---
+
+### Multi-tenancy
+
+```cpp
+struct Factura {
+    std::int64_t id;
+    std::string  tenant_id;
+    // ...
+    static constexpr auto table  = "facturas";
+    static constexpr auto tenant = true;
+};
+
+co_await syrax::Query<Factura>().forTenant(actor.tenant).get();
+```
+
+**Olvidar el `forTenant` lanza.** Es la decisión central: el fallo que esta feature no se puede permitir es servirle a un cliente los datos de otro, y con el tenant pasándose a mano basta olvidarlo una vez en un repositorio para que pase, en silencio y en producción. Un error ruidoso en la primera prueba convierte un fallo de seguridad en uno de programación normal.
+
+Se pasa explícito y no por un contexto implícito porque **con corrutinas no hay contexto por petición fiable**: un `co_await` reanuda en otro hilo, y un `thread_local` ahí no da un error, da los datos del tenant equivocado de vez en cuando. Es la misma trampa que documenta el apartado de inyección de dependencias.
+
+Sólo el modelo **por fila**: el de esquema y el de base por tenant son decisiones que no se pueden desandar, y un framework no debería elegirlas por ti.
+
+---
+
 ### Middleware, autenticación y políticas
 
 Un middleware es una función que recibe la petición y devuelve un `Error` para cortar, o nada para dejar pasar. Sin clases, sin registro global:
@@ -1405,6 +1498,7 @@ Las digo aquí en vez de que las descubras tú:
 - **`.change()` de columnas no va en SQLite.** El motor no tiene `ALTER COLUMN`: cambiar un tipo o una restricción exige reconstruir la tabla. Syrax lanza un error que lo explica en vez de generar SQL que el motor va a rechazar. En Postgres y MySQL funciona.
 - **`syrax migrate` compila.** Las migraciones son C++, así que hay un build de por medio. Es el precio de que una migración pueda usar tus tipos y que un error de esquema lo atrape el compilador; con `ccache` la recompilación es de segundos.
 - **Un middleware no ve el body *tipado*.** Corre antes del parseo: alcanza los bytes crudos por `request.drogon()->getBody()`, pero no el struct ya validado. Para reglas que dependen del contenido está `rules()`.
+- **`save()` y `remove()` no filtran por tenant.** Van por clave primaria, y el scope de multi-tenancy vive en `Query<T>`. Un `save()` sobre un objeto que llegó de otro tenant lo escribe igual; el sitio donde eso se evita es al leerlo.
 - **`Room` es de un solo proceso.** Un broadcast alcanza a las conexiones de *esta* instancia. Con varias réplicas detrás de un balanceador hace falta un bus externo, que Syrax no trae.
 - **El cache es un Redis, no una capa de cache.** `cache::` configura el cliente de Drogon y le pone encima `get`/`put`/`forget`/`remember`. No hay drivers intercambiables, tags, ni invalidación por dependencias: para eso está el cliente crudo.
 - **Un job corre al menos una vez.** Si el worker muere con uno en la mano, vuelve a la cola cuando vence `QUEUE_RETRY_AFTER`. No hay forma barata de prometer "exactamente una vez", así que Syrax no la promete.

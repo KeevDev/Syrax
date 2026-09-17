@@ -503,10 +503,21 @@ private:
                                      std::to_string(port_) + ": " + std::strerror(fallo));
         }
 
+        // Un Content-Type propio gana al de por defecto: mandar los dos deja
+        // al servidor eligiendo cual, y para subir un multipart hace falta que
+        // gane el del test.
+        const bool tipoPropio = std::ranges::any_of(defaults_, [](const Header& h) {
+            return std::ranges::equal(h.name, std::string_view{"content-type"},
+                                      [](char a, char b) {
+                                          return std::tolower(static_cast<unsigned char>(a)) ==
+                                                 std::tolower(static_cast<unsigned char>(b));
+                                      });
+        });
+
         std::string request;
         request += std::string{method} + " " + path + " HTTP/1.1\r\n";
         request += "Host: 127.0.0.1\r\n";
-        request += "Content-Type: application/json\r\n";
+        if (!tipoPropio) request += "Content-Type: application/json\r\n";
         for (const auto& h : defaults_) request += h.name + ": " + h.value + "\r\n";
         request += "Content-Length: " + std::to_string(body.size()) + "\r\n";
         request += "Connection: close\r\n\r\n";

@@ -24,6 +24,7 @@ add_executable(syrax_tests
     log_test.cpp
     jobs_test.cpp
     audit_test.cpp
+    jwks_crypto_test.cpp
     schedule_test.cpp
     ws_test.cpp
 )
@@ -31,7 +32,7 @@ target_link_libraries(syrax_tests PRIVATE syrax::syrax Catch2::Catch2WithMain)
 
 # El kit de tests va en su propio binario: syrax_tests ya levanta un servidor
 # con test_server.cpp, y Drogon solo admite un app().run() por proceso.
-add_executable(syrax_testing_kit_tests testing_kit_test.cpp health_test.cpp ratelimit_shared_test.cpp etag_test.cpp idempotency_test.cpp paginate_http_test.cpp fields_test.cpp http_client_test.cpp)
+add_executable(syrax_testing_kit_tests testing_kit_test.cpp health_test.cpp ratelimit_shared_test.cpp etag_test.cpp idempotency_test.cpp paginate_http_test.cpp fields_test.cpp http_client_test.cpp metrics_test.cpp uploads_test.cpp jwks_test.cpp)
 target_link_libraries(syrax_testing_kit_tests PRIVATE syrax::syrax Catch2::Catch2WithMain)
 
 # Solo se compila, no se ejecuta: es el guardia de que los ejemplos del

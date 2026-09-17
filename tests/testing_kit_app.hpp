@@ -8,6 +8,8 @@
 // funcion en vez de una variable porque Drogon solo admite un servidor por
 // proceso: todos tienen que ver LA MISMA.
 
+#include "testkeys.hpp"
+
 #include <syrax/syrax.hpp>
 #include <syrax/testing.hpp>
 
@@ -133,6 +135,7 @@ inline syrax::App create() {
     // cabecera no estuviera: se puede montar siempre.
     app.idempotency();
     app.partial();
+    app.metrics();
 
     auto api = app.api();
 
@@ -209,6 +212,74 @@ inline syrax::App create() {
             .requestId     = request.header("X-Request-Id"),
             .authorization = request.header("Authorization"),
         };
+    });
+
+    // --- subida de archivos ---------------------------------------------
+
+    struct Subido {
+        std::string              nombre;
+        std::string              extension;
+        std::size_t              peso = 0;
+        std::vector<std::string> fallos;
+    };
+
+    app.post("/subir", [](const syrax::Request& request) -> syrax::Result<Subido> {
+        const syrax::Uploads archivos{request};
+
+        const auto fallos = archivos.check({
+            syrax::upload("avatar").required().maxSize(1024).image(),
+        });
+
+        Subido out;
+        for (const auto& fallo : fallos) out.fallos.push_back(fallo.field + ": " + fallo.message);
+
+        if (const auto avatar = archivos.file("avatar")) {
+            out.nombre    = avatar->filename;
+            out.extension = avatar->extension;
+            out.peso      = avatar->size;
+        }
+        return out;
+    });
+
+    // --- JWKS ------------------------------------------------------------
+    //
+    // La app hace de proveedor de identidad para el test: publica su JWKS y
+    // tiene una ruta protegida detras del middleware.
+
+    struct Jwk {
+        std::string kty = "RSA";
+        std::string alg = "RS256";
+        std::string use = "sig";
+        std::string kid;
+        std::string n;
+        std::string e;
+    };
+    struct JwkSet {
+        std::vector<Jwk> keys;
+    };
+
+    app.get("/jwks.json", []() -> syrax::Result<JwkSet> {
+        ++hits();
+        return JwkSet{.keys = {Jwk{.kid = testkeys::kid(),
+                                   .n   = testkeys::modulusB64(),
+                                   .e   = testkeys::exponentB64()}}};
+    });
+
+    // La URL va como funcion y no como cadena: el puerto no existe todavia
+    // -lo asigna el kernel al arrancar- y una cadena lo congelaria en 0.
+    app.useAsync("/protegido",
+                 syrax::auth::jwks(
+                     [] {
+                         return "http://127.0.0.1:" + std::to_string(testkeys::puerto()) +
+                                "/jwks.json";
+                     },
+                     {.issuer     = "https://emisor.de.prueba/",
+                      .audience   = "api-de-prueba",
+                      .minRefresh = std::chrono::seconds{0}}));
+
+    app.get("/protegido", [](const syrax::Request& request) -> syrax::Result<Eco> {
+        const auto actor = syrax::actorFrom(request);
+        return Eco{.hits = 0, .requestId = actor.id, .authorization = actor.scope};
     });
 
     app.get("/cuenta", []() -> syrax::Result<Eco> { return Eco{.hits = hits()}; });

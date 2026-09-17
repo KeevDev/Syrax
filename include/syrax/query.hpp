@@ -89,12 +89,21 @@ concept Timestamps = requires { T::timestamps; };
 template <typename T>
 concept SoftDeletes = requires { T::softDeletes; };
 
+// Multi-tenancy por fila. Solo el modelo de fila: el de esquema y el de base
+// por tenant son decisiones que no se pueden desandar, y un framework no
+// deberia elegirlas por ti.
+//
+//   static constexpr auto tenant = true;   // usa la columna tenant_id
+template <typename T>
+concept Tenant = requires { T::tenant; };
+
 // Los nombres son fijos. Hacerlos configurables anade tres puntos de
 // configuracion para ahorrar un rename en la migracion, y estos tres nombres
 // son los que usa todo el mundo.
 inline constexpr std::string_view kCreatedAt = "created_at";
 inline constexpr std::string_view kUpdatedAt = "updated_at";
 inline constexpr std::string_view kDeletedAt = "deleted_at";
+inline constexpr std::string_view kTenantId  = "tenant_id";
 
 // La hora la pone la BASE, no el proceso. Con varias instancias, los relojes
 // de las maquinas difieren y dos filas creadas en orden pueden quedar con
@@ -264,6 +273,16 @@ public:
         return *this;
     }
 
+    // Ata la consulta a un tenant. Obligatorio en un modelo que lo declara:
+    // ver el guardia de abajo.
+    Query& forTenant(std::string id) {
+        static_assert(detail::Tenant<T>,
+                      "syrax: forTenant() necesita `static constexpr auto tenant = true;` en el "
+                      "modelo. Sin eso no hay columna que filtrar.");
+        tenant_ = std::move(id);
+        return *this;
+    }
+
     // Incluye tambien las filas borradas. Solo tiene sentido en un modelo con
     // softDeletes; en los demas no hay nada que incluir y no compila, que es
     // mejor que pasar desapercibido.
@@ -298,7 +317,8 @@ public:
     // --- ejecucion ---
 
     drogon::Task<std::vector<T>> get() const {
-        const auto result = co_await detail::run(target(), select(), params_);
+        requireTenant();
+        const auto result = co_await detail::run(target(), select(), bound());
 
         std::vector<T> rows;
         rows.reserve(result.size());
@@ -316,9 +336,11 @@ public:
     }
 
     drogon::Task<std::int64_t> count() const {
+        requireTenant();
+
         const std::string sql = "SELECT count(*) FROM \"" + detail::tableOf<T>() + "\"" + whereClause();
 
-        const auto result = co_await detail::run(target(), sql, params_);
+        const auto result = co_await detail::run(target(), sql, bound());
         if (result.empty() || result.front().size() == 0) co_return 0;
 
         co_return result.front()[0].template as<std::int64_t>();
@@ -369,18 +391,20 @@ public:
     // tabla, que es el punto: un borrado de verdad no se deshace, y la mitad
     // de las veces que alguien borra algo en produccion querria deshacerlo.
     drogon::Task<std::size_t> del() const {
+        requireTenant();
+
         if constexpr (detail::SoftDeletes<T>) {
             const std::string sql = "UPDATE \"" + detail::tableOf<T>() + "\" SET \"" +
                                     std::string{detail::kDeletedAt} + "\" = " +
                                     std::string{detail::kNow} + whereClause();
 
-            const auto result = co_await detail::run(target(), sql, params_);
+            const auto result = co_await detail::run(target(), sql, bound());
             co_return result.affectedRows();
         } else {
             const std::string sql =
                 "DELETE FROM \"" + detail::tableOf<T>() + "\"" + whereClause();
 
-            const auto result = co_await detail::run(target(), sql, params_);
+            const auto result = co_await detail::run(target(), sql, bound());
             co_return result.affectedRows();
         }
     }
@@ -389,9 +413,11 @@ public:
     // "borrar para siempre" es una operacion legitima -el RGPD la exige- y
     // esconderla obligaria a escribir el DELETE a mano, sin los filtros.
     drogon::Task<std::size_t> forceDelete() const {
+        requireTenant();
+
         const std::string sql = "DELETE FROM \"" + detail::tableOf<T>() + "\"" + whereClause();
 
-        const auto result = co_await detail::run(target(), sql, params_);
+        const auto result = co_await detail::run(target(), sql, bound());
         co_return result.affectedRows();
     }
 
@@ -402,6 +428,8 @@ public:
                       "syrax: restore() necesita `static constexpr auto softDeletes = true;` "
                       "en el modelo.");
 
+        requireTenant();
+
         Query copy{*this};
         copy.trashed_ = Trashed::Only;
 
@@ -409,7 +437,7 @@ public:
                                 std::string{detail::kDeletedAt} + "\" = NULL" +
                                 copy.whereClause();
 
-        const auto result = co_await detail::run(target(), sql, params_);
+        const auto result = co_await detail::run(target(), sql, bound());
         co_return result.affectedRows();
     }
 
@@ -417,6 +445,7 @@ public:
     // consulta. Devuelve cuantas cambiaron. Sin filtros toca la tabla entera,
     // igual que el SQL a mano.
     drogon::Task<std::size_t> update() const {
+        requireTenant();
         if (sets_.empty()) co_return 0;
 
         auto plan = updatePlan();
@@ -491,8 +520,39 @@ private:
         where_ += std::move(expression);
     }
 
+    // El fallo que esta feature no se puede permitir es servirle a un cliente
+    // los datos de otro. Y con el tenant pasandose a mano, basta olvidarlo UNA
+    // vez en un repositorio para que eso pase, en silencio y en produccion.
+    //
+    // Por eso olvidarlo no devuelve todas las filas: lanza. Un 500 ruidoso en
+    // la primera prueba es infinitamente mejor que una fuga que nadie ve, y
+    // convierte un fallo de seguridad en un fallo de programacion normal.
+    void requireTenant() const {
+        if constexpr (detail::Tenant<T>) {
+            if (!tenant_) {
+                throw std::runtime_error(
+                    "syrax: la consulta sobre '" + detail::tableOf<T>() +
+                    "' no dice de que tenant es. El modelo declara `tenant`, asi que hay que "
+                    "llamar a forTenant(id) antes de ejecutarla: devolver las filas de todos "
+                    "los tenants seria una fuga de datos.");
+            }
+        }
+    }
+
     std::string whereClause() const {
         std::string clause = where_;
+
+        if constexpr (detail::Tenant<T>) {
+            if (tenant_) {
+                // Va con parentesis por lo mismo que el filtro de borrados: sin
+                // ellos, un where con OR se combinaria mal y devolveria filas
+                // de otro tenant.
+                const auto extra = "\"" + std::string{detail::kTenantId} + "\" = " +
+                                   detail::placeholder(paramBase_ + params_.size() + 1);
+
+                clause = clause.empty() ? extra : "(" + clause + ") AND " + extra;
+            }
+        }
 
         if constexpr (detail::SoftDeletes<T>) {
             const std::string column = "\"" + std::string{detail::kDeletedAt} + "\"";
@@ -518,11 +578,15 @@ private:
     std::pair<std::string, std::vector<detail::ParamBinder>> updatePlan() const {
         const bool numbered = db::dialect() == db::Dialect::Postgres;
 
+        // El del tenant ya ocupa un hueco detras de los del where, asi que los
+        // del SET empiezan despues de el.
+        const auto previos = bound().size();
+
         std::string assignments;
         for (std::size_t i = 0; i < sets_.size(); ++i) {
             if (i) assignments += ", ";
             assignments += "\"" + sets_[i].column + "\" = " +
-                           detail::placeholder(numbered ? params_.size() + i + 1 : i + 1);
+                           detail::placeholder(numbered ? previos + i + 1 : i + 1);
         }
 
         // Una fila que cambia y no actualiza su updated_at deja el campo
@@ -533,19 +597,31 @@ private:
                            std::string{detail::kNow};
         }
 
+        auto                             where = bound();
         std::vector<detail::ParamBinder> params;
-        params.reserve(params_.size() + sets_.size());
+        params.reserve(where.size() + sets_.size());
 
         if (numbered) {
-            params = params_;
+            params = where;
             for (const auto& assignment : sets_) params.push_back(assignment.bind);
         } else {
             for (const auto& assignment : sets_) params.push_back(assignment.bind);
-            params.insert(params.end(), params_.begin(), params_.end());
+            params.insert(params.end(), where.begin(), where.end());
         }
 
         return {"UPDATE \"" + detail::tableOf<T>() + "\" SET " + assignments + whereClause(),
                 std::move(params)};
+    }
+
+    // Los del where mas, si lo hay, el del tenant. Va al final porque su
+    // predicado tambien se escribe al final del WHERE, y en sqlite el orden de
+    // enlace es el de aparicion en el SQL.
+    std::vector<detail::ParamBinder> bound() const {
+        auto out = params_;
+        if constexpr (detail::Tenant<T>) {
+            if (tenant_) out.push_back(detail::binder(*tenant_));
+        }
+        return out;
     }
 
     std::string select() const {
@@ -570,6 +646,7 @@ private:
     std::string                      order_;
     std::optional<std::size_t>       limit_;
     std::optional<std::size_t>       offset_;
+    std::optional<std::string>       tenant_;
     std::vector<detail::ParamBinder> params_;
     std::vector<Assignment>          sets_;
     std::size_t                      paramBase_ = 0;

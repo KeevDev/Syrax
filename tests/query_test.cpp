@@ -824,3 +824,136 @@ TEST_CASE("sin los marcadores, del() borra como siempre", "[query][softdeletes]"
     CHECK(drogon::sync_wait(Query<Plain>(db.get()).del()) == 1);
     CHECK(db.get()->execSqlSync("SELECT id FROM notes").empty());
 }
+
+// ------------------------------------------------------------ multi-tenancy
+
+namespace qtest {
+
+struct Factura {
+    std::int64_t id;
+    std::string  tenant_id;
+    int          total;
+
+    static constexpr auto table  = "facturas";
+    static constexpr auto tenant = true;
+};
+
+class TenantDb {
+public:
+    TenantDb() : path_{fs::temp_directory_path() / name()} {
+        std::error_code ec;
+        fs::remove(path_, ec);
+
+        client_ = drogon::orm::DbClient::newSqlite3Client("filename=" + path_.string(), 1);
+        client_->execSqlSync(
+            "CREATE TABLE facturas (id INTEGER PRIMARY KEY AUTOINCREMENT, tenant_id TEXT, "
+            "total INTEGER)");
+        client_->execSqlSync(
+            "INSERT INTO facturas (tenant_id, total) VALUES "
+            "('acme', 100), ('acme', 200), ('globex', 300)");
+    }
+    ~TenantDb() {
+        vivos().push_back(client_);
+        client_.reset();
+
+        std::error_code ec;
+        fs::remove(path_, ec);
+    }
+
+    const drogon::orm::DbClientPtr& get() const { return client_; }
+
+private:
+    static std::string name() {
+        static int counter = 0;
+        return "syrax_tenant_" + std::to_string(::getpid()) + "_" + std::to_string(counter++) + ".db";
+    }
+
+    fs::path                 path_;
+    drogon::orm::DbClientPtr client_;
+};
+
+}  // namespace qtest
+
+TEST_CASE("forTenant deja ver solo las filas de ese tenant", "[query][tenant]") {
+    SqliteDialect dialect;
+    TenantDb      db;
+
+    CHECK(drogon::sync_wait(Query<Factura>(db.get()).forTenant("acme").count()) == 2);
+    CHECK(drogon::sync_wait(Query<Factura>(db.get()).forTenant("globex").count()) == 1);
+    CHECK(drogon::sync_wait(Query<Factura>(db.get()).forTenant("nadie").count()) == 0);
+}
+
+TEST_CASE("olvidar el tenant LANZA, no devuelve todo", "[query][tenant]") {
+    SqliteDialect dialect;
+    TenantDb      db;
+
+    // Es la decision central. Devolver las tres filas seria servirle a un
+    // cliente los datos de otro, en silencio y en produccion. Un 500 ruidoso
+    // en la primera prueba convierte un fallo de seguridad en uno de
+    // programacion normal.
+    CHECK_THROWS_AS(drogon::sync_wait(Query<Factura>(db.get()).count()), std::runtime_error);
+    CHECK_THROWS_AS(drogon::sync_wait(Query<Factura>(db.get()).get()), std::runtime_error);
+    CHECK_THROWS_AS(drogon::sync_wait(Query<Factura>(db.get()).del()), std::runtime_error);
+    CHECK_THROWS_AS(
+        drogon::sync_wait(Query<Factura>(db.get()).set(&Factura::total, 1).update()),
+        std::runtime_error);
+}
+
+TEST_CASE("el filtro de tenant no se rompe con un where con OR", "[query][tenant]") {
+    SqliteDialect dialect;
+    TenantDb      db;
+
+    // Sin parentesis, esto seria "total = 100 OR (total = 300 AND tenant =
+    // acme)" y devolveria la factura de globex.
+    const auto encontradas = drogon::sync_wait(Query<Factura>(db.get())
+                                                   .forTenant("acme")
+                                                   .where(&Factura::total, "=", 100)
+                                                   .orWhere(&Factura::total, "=", 300)
+                                                   .get());
+
+    REQUIRE(encontradas.size() == 1);
+    CHECK(encontradas.front().total == 100);
+}
+
+TEST_CASE("un borrado no toca las filas de otro tenant", "[query][tenant]") {
+    SqliteDialect dialect;
+    TenantDb      db;
+
+    CHECK(drogon::sync_wait(Query<Factura>(db.get()).forTenant("acme").del()) == 2);
+
+    // La de globex sigue ahi.
+    CHECK(db.get()->execSqlSync("SELECT id FROM facturas").size() == 1);
+}
+
+TEST_CASE("un update no toca las filas de otro tenant", "[query][tenant]") {
+    SqliteDialect dialect;
+    TenantDb      db;
+
+    drogon::sync_wait(Query<Factura>(db.get()).forTenant("acme").set(&Factura::total, 0).update());
+
+    const auto globex = db.get()->execSqlSync(
+        "SELECT total FROM facturas WHERE tenant_id = 'globex'");
+    REQUIRE(globex.size() == 1);
+    CHECK(globex.front()["total"].as<int>() == 300);
+}
+
+TEST_CASE("paginar respeta el tenant", "[query][tenant]") {
+    SqliteDialect dialect;
+    TenantDb      db;
+
+    const auto pagina =
+        drogon::sync_wait(Query<Factura>(db.get()).forTenant("acme").orderBy(&Factura::id).paginate(1, 10));
+
+    // El total es el del tenant, no el de la tabla: si no, el paginador del
+    // cliente mostraria paginas que no existen para el.
+    CHECK(pagina.total == 2);
+    CHECK(pagina.data.size() == 2);
+}
+
+TEST_CASE("un modelo sin tenant no cambia en nada", "[query][tenant]") {
+    SqliteDialect dialect;
+    TempDb        db;
+
+    // Sin el marcador no hay guardia ni filtro: el comportamiento de siempre.
+    CHECK(drogon::sync_wait(Query<User>(db.get()).count()) == 4);
+}

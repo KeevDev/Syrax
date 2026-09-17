@@ -78,9 +78,101 @@ constexpr std::string_view kDefaultTag  = "v" SYRAX_VERSION;
 
 // ------------------------------------------------------------------ utilidades
 
+inline constexpr std::string_view kRedisService = R"(
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+)";
+
+// Lo que se decide al crear un proyecto.
+//
+// Son DOS ejes ademas del motor, y no cuatro. El roadmap avisaba de que cada
+// pregunta multiplica las combinaciones que el CI tiene que compilar, asi que
+// solo entra la que cambia archivos de verdad: cache decide un servicio de
+// docker y una conexion, y auth decide middleware, configuracion y variables.
+//
+// La de "¿quieres /docs?" se quedo fuera a proposito: cambia UNA linea
+// (app.withoutDocs()), y una pregunta que ahorra una linea no vale duplicar la
+// matriz de compilaciones.
+enum class Auth { None, Jwt, Jwks };
+
+struct Choices {
+    tpl::Engine engine = tpl::Engine::Postgres;
+    bool        cache  = false;
+    Auth        auth   = Auth::None;
+};
+
+std::string authEnv(Auth auth) {
+    switch (auth) {
+        case Auth::Jwt:
+            return "\n# El secreto con el que se firman y verifican tus tokens. CAMBIALO.\n"
+                   "JWT_SECRET=cambia-esto-por-algo-largo-y-aleatorio\n";
+        case Auth::Jwks:
+            return "\n# El proveedor que emite los tokens. issuer y audience no son opcionales\n"
+                   "# en la practica: sin audience, vale un token de otro cliente del mismo\n"
+                   "# proveedor, y esa firma es perfectamente valida.\n"
+                   "JWKS_URL=https://tu-tenant.auth0.com/.well-known/jwks.json\n"
+                   "JWT_ISSUER=https://tu-tenant.auth0.com/\n"
+                   "JWT_AUDIENCE=https://api.tuempresa.com\n";
+        case Auth::None:
+            break;
+    }
+    return "";
+}
+
+std::string authConfig(Auth auth) {
+    switch (auth) {
+        case Auth::Jwt:
+            return "\n    std::string jwtSecret = \"cambia-esto\";\n";
+        case Auth::Jwks:
+            return "\n    std::string jwksUrl     = \"\";\n"
+                   "    std::string jwtIssuer   = \"\";\n"
+                   "    std::string jwtAudience = \"\";\n";
+        case Auth::None:
+            break;
+    }
+    return "";
+}
+
+// El middleware de autenticacion va COMENTADO, y no es pereza.
+//
+// Que rutas protege es una decision del proyecto que el generador no puede
+// tomar: un `app.use(cfg.apiBase, ...)` a ciegas protegeria tambien el propio
+// login, que por definicion tiene que ser publico, y dejaria los tests
+// generados devolviendo 401 desde el primer minuto.
+//
+// Lo que si queda cableado de verdad es todo lo demas: las variables en el
+// .env, los campos en config.hpp y la linea exacta lista para descomentar
+// sobre el prefijo que tu elijas.
+std::string authMiddleware(Auth auth) {
+    switch (auth) {
+        case Auth::Jwt:
+            return "\n    // Exige un Bearer token firmado por esta misma API. Elige el prefijo:\n"
+                   "    // el login tiene que quedar fuera, y /health tambien.\n"
+                   "    //\n"
+                   "    //   app.use(cfg.apiBase + \"/pedidos\", syrax::auth::bearer(cfg.jwtSecret));\n";
+        case Auth::Jwks:
+            return "\n    // Verifica tokens de tu proveedor de identidad. Va con useAsync porque\n"
+                   "    // puede tener que bajar las claves. Elige el prefijo que protege:\n"
+                   "    //\n"
+                   "    //   app.useAsync(cfg.apiBase + \"/pedidos\",\n"
+                   "    //                syrax::auth::jwks(cfg.jwksUrl, {.issuer   = cfg.jwtIssuer,\n"
+                   "    //                                                .audience = cfg.jwtAudience}));\n";
+        case Auth::None:
+            break;
+    }
+    return "";
+}
+
 std::string substitute(std::string_view tpl, std::string_view name,
                        std::string_view repo, std::string_view tag,
-                       tpl::Engine engine) {
+                       tpl::Engine engine, Choices choices = {}) {
     const bool pg    = (engine == tpl::Engine::Postgres);
     const bool mysql = (engine == tpl::Engine::Mysql);
 
@@ -99,6 +191,12 @@ std::string substitute(std::string_view tpl, std::string_view name,
         {"@P1@",       pg ? "$1" : "?"},
         {"@P2@",       pg ? "$2" : "?"},
         {"@P3@",       pg ? "$3" : "?"},
+
+        {"@CACHE@",    choices.cache ? "true" : "false"},
+        {"@REDIS@",    choices.cache ? std::string{kRedisService} : std::string{}},
+        {"@AUTHENV@",  authEnv(choices.auth)},
+        {"@AUTHCFG@",  authConfig(choices.auth)},
+        {"@AUTHUSE@",  authMiddleware(choices.auth)},
     };
 
     std::string out{tpl};
@@ -219,6 +317,32 @@ tpl::Engine promptEngine() {
     if (line == "2" || line == "mysql" || line == "mariadb") return tpl::Engine::Mysql;
     if (line == "3" || line == "sqlite" || line == "sqlite3") return tpl::Engine::Sqlite;
     return tpl::Engine::Postgres;
+}
+
+bool promptCache() {
+    std::cout << "\ncache y colas con Redis:\n"
+              << "  1) no  — la cola usa tu base de datos, sin nada mas que instalar\n"
+              << "  2) si  — agrega redis al docker-compose y enciende el cache\n"
+              << "eleccion [1]: " << std::flush;
+
+    std::string line;
+    std::getline(std::cin, line);
+    return line == "2" || line == "si" || line == "s" || line == "yes" || line == "y";
+}
+
+Auth promptAuth() {
+    std::cout << "\nautenticacion:\n"
+              << "  1) ninguna  — la pones tu cuando toque\n"
+              << "  2) jwt      — tokens que firma y verifica esta misma API\n"
+              << "  3) jwks     — tokens de Auth0, Keycloak o Cognito\n"
+              << "eleccion [1]: " << std::flush;
+
+    std::string line;
+    std::getline(std::cin, line);
+
+    if (line == "2" || line == "jwt") return Auth::Jwt;
+    if (line == "3" || line == "jwks") return Auth::Jwks;
+    return Auth::None;
 }
 
 // Lee el .env del proyecto. No es un parser completo de dotenv: KEY=VALUE,
@@ -414,7 +538,8 @@ int cmdCacheClear(bool force) {
     return 0;
 }
 
-int cmdNew(const std::string& name, tpl::Engine engine, bool engineGiven) {
+int cmdNew(const std::string& name, Choices choices, bool engineGiven, bool cacheGiven,
+           bool authGiven) {
     if (name.empty()) {
         std::cerr << "error: falta el nombre.  uso: syrax new <nombre>\n";
         return 1;
@@ -424,7 +549,15 @@ int cmdNew(const std::string& name, tpl::Engine engine, bool engineGiven) {
         return 1;
     }
 
-    if (!engineGiven) engine = promptEngine();
+    // Sin terminal no se pregunta nada: lo que no venga por flag se queda con
+    // su valor por defecto, para que esto siga sirviendo en un script.
+    const bool interactiva = isatty(STDIN_FILENO) == 1;
+
+    if (!engineGiven) choices.engine = promptEngine();
+    if (!cacheGiven && interactiva) choices.cache = promptCache();
+    if (!authGiven && interactiva) choices.auth = promptAuth();
+
+    const auto engine = choices.engine;
 
     const auto     repo = envOr("SYRAX_REPO", kDefaultRepo);
     const auto     tag  = envOr("SYRAX_TAG", kDefaultTag);
@@ -438,7 +571,7 @@ int cmdNew(const std::string& name, tpl::Engine engine, bool engineGiven) {
         const fs::path out = root / file.path;
         if (out.has_parent_path()) fs::create_directories(out.parent_path());
 
-        if (!writeFile(out, substitute(file.content, name, repo, tag, engine))) {
+        if (!writeFile(out, substitute(file.content, name, repo, tag, engine, choices))) {
             return 1;
         }
         written.emplace_back(file.path);
@@ -1157,7 +1290,10 @@ int usage() {
         "syrax " SYRAX_VERSION "\n"
         "\n"
         "uso:\n"
-        "  new <nombre> [--db postgres|mysql|sqlite]  n  crea un proyecto\n"
+        "  new <nombre>                          n    crea un proyecto\n"
+        "      [--db postgres|mysql|sqlite]           el motor de base\n"
+        "      [--cache | --no-cache]                 redis para cache y colas\n"
+        "      [--auth none|jwt|jwks]                 autenticacion\n"
         "  build                                 b    configura y compila\n"
         "  serve [--port N] [--no-watch]         s    levanta y recompila al guardar; q sale\n"
         "  routes                                r    lista las rutas registradas\n"
@@ -1188,7 +1324,8 @@ int usage() {
         "  version                               -v   muestra la version\n"
         "  help                                  -h   esta ayuda\n"
         "\n"
-        "Sin --db, `new` pregunta el motor si hay terminal interactiva.\n"
+        "Lo que no venga por flag se pregunta, si hay terminal interactiva; si no,\n"
+        "se queda con el valor por defecto para que esto sirva en un script.\n"
         "\n"
         "variables de entorno:\n"
         "  SYRAX_REPO   origen de syrax para proyectos nuevos (default: GitHub)\n"
@@ -1206,29 +1343,51 @@ int main(int argc, char** argv) {
 
     if (cmd == "new") {
         std::string name;
-        auto        engine      = tpl::Engine::Postgres;
+        Choices     choices;
         bool        engineGiven = false;
+        bool        cacheGiven  = false;
+        bool        authGiven   = false;
 
         for (std::size_t i = 1; i < args.size(); ++i) {
             if ((args[i] == "--db" || args[i] == "-d") && i + 1 < args.size()) {
                 const auto& value = args[++i];
                 if (value == "sqlite" || value == "sqlite3") {
-                    engine = tpl::Engine::Sqlite;
+                    choices.engine = tpl::Engine::Sqlite;
                 } else if (value == "mysql" || value == "mariadb") {
-                    engine = tpl::Engine::Mysql;
+                    choices.engine = tpl::Engine::Mysql;
                 } else if (value == "postgres" || value == "postgresql" || value == "pg") {
-                    engine = tpl::Engine::Postgres;
+                    choices.engine = tpl::Engine::Postgres;
                 } else {
                     std::cerr << "error: --db acepta 'postgres', 'mysql' o 'sqlite', no '"
                               << value << "'\n";
                     return 1;
                 }
                 engineGiven = true;
+            } else if (args[i] == "--cache" || args[i] == "--redis") {
+                choices.cache = true;
+                cacheGiven    = true;
+            } else if (args[i] == "--no-cache") {
+                choices.cache = false;
+                cacheGiven    = true;
+            } else if (args[i] == "--auth" && i + 1 < args.size()) {
+                const auto& value = args[++i];
+                if (value == "none" || value == "ninguna") {
+                    choices.auth = Auth::None;
+                } else if (value == "jwt") {
+                    choices.auth = Auth::Jwt;
+                } else if (value == "jwks") {
+                    choices.auth = Auth::Jwks;
+                } else {
+                    std::cerr << "error: --auth acepta 'none', 'jwt' o 'jwks', no '" << value
+                              << "'\n";
+                    return 1;
+                }
+                authGiven = true;
             } else if (name.empty()) {
                 name = args[i];
             }
         }
-        return cmdNew(name, engine, engineGiven);
+        return cmdNew(name, choices, engineGiven, cacheGiven, authGiven);
     }
 
     if (cmd == "build")            return cmdBuild();

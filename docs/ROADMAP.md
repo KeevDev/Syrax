@@ -29,6 +29,10 @@ a veces con otro nombre. Conviene mirar aquí primero.
 | **Soft deletes** | `query.hpp` → `softDeletes` en el modelo | Con `withTrashed`, `onlyTrashed`, `restore` y `forceDelete`. |
 | **Auditoría** | `audit.hpp` → `record`, `of`, `by` | Append-only, y transaccional si se le pasa el cliente de la transacción. |
 | **Cliente HTTP** | `http.hpp` → `http::Client` | Timeout, reintentos sólo idempotentes y propagación del request-id. |
+| **OAuth2 / OIDC (validar)** | `jwks.hpp` → `auth::jwks(url)` | Tokens de Auth0, Keycloak o Cognito. Ser el proveedor sigue fuera. |
+| **Subida de archivos** | `uploads.hpp` → `Uploads`, `upload()` | Firma de bytes para imágenes y pdf. El guardado no: eso es storage. |
+| **Métricas** | `app.metrics()` | Cuatro contadores en formato Prometheus. |
+| **Multi-tenancy por fila** | `Query<T>::forTenant(id)` | Olvidarlo lanza, no filtra. |
 | **DTOs** | `resources/` y `requests/` del andamiaje | Son DTOs de entrada y de salida, con el nombre que usa el README. |
 | **Cache abstraction** | `cache.hpp` → `get/put/forget/has/remember` | La abstracción existe; el único driver es Redis. |
 | **Healthcheck** | `health.hpp` → `app.health()` | Pregunta a cada base y cada Redis registrados. `health::probe()` agrega las del proyecto. |
@@ -71,6 +75,11 @@ qué se cerró; lo que sigue pendiente está en el nivel 2.
 | **Soft deletes y timestamps** | `static constexpr auto softDeletes` / `timestamps` en el modelo. `del()` marca en vez de borrar, `withTrashed()` / `onlyTrashed()` / `restore()` / `forceDelete()`, y `created_at`/`updated_at` los pone la base. |
 | **Auditoría** | `audit.hpp`: tabla append-only con quién, qué, sobre qué y el request-id, que sale de la trazabilidad sin copiarlo a mano. Dentro de la transacción que hace el cambio, para que no registre cosas que no pasaron. |
 | **Cliente HTTP** | `http.hpp`: timeout de fábrica, reintento con espera creciente **sólo en métodos idempotentes**, y `trace(request)` que propaga el `X-Request-Id`. Sin breaker ni descubrimiento. |
+| **Validar tokens de terceros** | `jwks.hpp` → `auth::jwks(url)`: firma RS256 contra el JWKS del proveedor, con caché de claves y recarga limitada. El algoritmo **se exige**, no se lee del token; `issuer` y `audience` se comprueban. |
+| **Subida de archivos con reglas** | `uploads.hpp`: tamaño, extensión y —lo que importa— `image()`/`pdf()` que miran los **primeros bytes**, no el tipo que declara el cliente. No hay filtro por MIME, y el motivo está escrito. |
+| **Métricas** | `app.metrics()`: cuatro contadores en el formato de Prometheus. Sin etiquetas por ruta, porque una ruta con un id dentro es cardinalidad sin techo. |
+| **Multi-tenancy por fila** | `static constexpr auto tenant` + `Query<T>::forTenant(id)`. Olvidarlo **lanza** en vez de devolver las filas de todos: un fallo ruidoso en vez de una fuga silenciosa. |
+| **`syrax new` con asistente** | Dos ejes además del motor —cache y auth—, los que cambian archivos de verdad. La pregunta de `/docs` se quedó fuera: cambia una línea y no vale duplicar la matriz. |
 
 Tres cosas que cambiaron de plan por el camino:
 
@@ -86,15 +95,11 @@ Tres cosas que cambiaron de plan por el camino:
   original; el framework ya sabe si está delante de una terminal, así que la
   línea en color la escribe él. Menos piezas y el mismo resultado.
 
-## Nivel 2 — valor alto, superficie finita
+## Nivel 2 — vacío
 
-| Qué | Por qué | Coste |
-|---|---|---|
-| **Validar tokens de terceros** (`auth::jwks(url)`) | La parte finita y útil de OAuth2/OIDC: verificar la firma de un token de Auth0, Keycloak o Cognito contra su JWKS, con caché de claves. *Ser* el proveedor no entra (ver abajo). | Medio |
-| **Subida de archivos con reglas** | `request.file("avatar")` con límites de tamaño y mime en el mismo lenguaje que `validation`. El guardado no: eso es storage, y storage no es finito. | Medio |
-| **Métricas** | Frontera: cuatro contadores en `/metrics` sí es finito; el día que alguien pida histogramas con labels, no. Después del nivel 1. | Medio |
-| **`syrax new` con asistente** | Preguntar base, cache, auth y docs en vez de sólo el motor. **Con cuidado:** cada eje multiplica las combinaciones que hay que compilar en el CI. Entra sólo si cada pregunta cambia archivos de verdad, y con pocos ejes. | Medio |
-| **Multi-tenancy por fila** | `tenant_id` con un scope global en `Query<T>`. Sólo el modelo de fila: el de esquema y el de base por tenant son decisiones que no se pueden desandar, y un framework no debería elegirlas por ti. | Medio |
+No queda nada. Lo que había está arriba, en *Hecho*; lo que se descartó y por
+qué, abajo. Cuando aparezca algo nuevo que pase la regla de admisión, aquí es
+donde va antes de escribirse.
 
 ## Nivel 3 — se quedan fuera, y por qué
 
@@ -113,7 +118,7 @@ Agrupados por la razón, que es más útil que una lista plana.
 | Qué | Por qué no |
 |---|---|
 | **RabbitMQ**, **Kafka**, **SQS** | Cada uno es un SDK entero con su propio modelo: exchanges y bindings, particiones y offsets, visibility timeouts. Y **Kafka no es una cola, es un log**: forzarlo a las seis operaciones de `jobs::Driver` sería mentir sobre lo que hace. El día que necesitas Kafka de verdad, quieres Kafka, no la idea que Syrax se hizo de Kafka. |
-| **OAuth2**, **OIDC** (como proveedor) | Son especificaciones, no features: discovery, JWKS, rotación de claves, PKCE, refresh, cuatro flujos y sus modos de fallo. La mitad finita —*validar* un token ajeno— está en el nivel 2. Ser el proveedor, no. |
+| **OAuth2**, **OIDC** (como proveedor) | Son especificaciones, no features: discovery, JWKS, rotación de claves, PKCE, refresh, cuatro flujos y sus modos de fallo. La mitad finita —*validar* un token ajeno— **ya está hecha**, en `jwks.hpp`. Ser el proveedor, no. |
 | **Sessions** | Otro modelo de identidad: cookie, almacén de sesión, CSRF, fijación, expiración deslizante. Para una API, el token ya cubre el caso; mezclar los dos modelos es donde aparecen los agujeros. |
 | **Feature modules instalables** | Es un gestor de paquetes: resolución de versiones, dependencias entre módulos, puntos de extensión estables. Eso ya es CMake y FetchContent. |
 | **Capa de idiomas (i18n)** | Para una API el mensaje traducido casi siempre lo pone el cliente, que es quien sabe el idioma del usuario. Y **el `code` estable de la capa de errores es justo lo que lo hace innecesario**: el servidor manda `saldo_insuficiente` y el cliente decide cómo se dice. |
@@ -131,15 +136,18 @@ Agrupados por la razón, que es más útil que una lista plana.
 
 ## Qué más va en `bootstrap/`
 
-Hoy el andamiaje tiene `app`, `database`, `cache` y `queue`. El patrón funciona
-—cada preocupación en su archivo, `create()` las llama en orden— y varios puntos
-de arriba aterrizan justo ahí:
+El patrón —cada preocupación en su archivo, `create()` las llama en orden— dio
+para todo lo que fue llegando. Hoy el andamiaje tiene siete:
 
-| Archivo | Qué configura | Viene de |
-|---|---|---|
-| `middleware.cpp` | CORS, rate limit, cabeceras de seguridad, api key | Nivel 1 |
-| `errors.cpp` | Formato del error y traducción de excepciones | Nivel 1 |
-| `schedule.cpp` | Tareas periódicas | Nivel 2 |
+| Archivo | Qué configura |
+|---|---|
+| `config.cpp` | Toda la configuración, tipada y validada. **Va primero** |
+| `database.cpp` | La conexión a la base |
+| `cache.cpp` | El Redis, si lo enciendes |
+| `queue.cpp` | El driver de la cola y los jobs registrados |
+| `schedule.cpp` | Las tareas periódicas |
+| `middleware.cpp` | CORS, rate limit, cabeceras, ETag, `?fields`, y la autenticación que elijas |
+| `errors.cpp` | Formato del error y traducción de excepciones |
 
 Y dos que conviene **no** crear. `logging.cpp` no está en esa tabla a propósito:
 `LOG_FORMAT`, `LOG_LEVEL` y `LOG_ACCESS` ya configuran el log, y `log::install()`

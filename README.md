@@ -88,21 +88,16 @@ Con `--auth`, el `.env` y `config.hpp` quedan cableados de verdad y `middleware.
 
 ## Índice
 
-**Empezar** — [Instalación](#instalación) · [`syrax new`](#el-asistente-de-syrax-new) · [El camino de una petición](#el-camino-de-una-petición)
-
-**[La petición](#la-petición)** — [Errores como valores](#errores-como-valores) · [Validación](#validación) · [Paginación](#paginación) · [Serialización parcial](#serialización-parcial) · [ETag y 304](#etag-y-304) · [Archivos subidos](#archivos-subidos) · [WebSockets](#websockets)
-
-**[La base de datos](#la-base-de-datos)** — [Consultas y transacciones](#consultas-y-transacciones) · [Query builder tipado](#query-builder-tipado) · [Migraciones en C++](#migraciones-en-c) · [Soft deletes y timestamps](#soft-deletes-y-timestamps) · [Multi-tenancy](#multi-tenancy)
-
-**[Seguridad](#seguridad)** — [Middleware, autenticación y políticas](#middleware-autenticación-y-políticas) · [Permisos finos](#permisos-finos) · [Tokens de otro proveedor](#tokens-de-otro-proveedor) · [Rate limiting](#rate-limiting) · [Reintentos seguros](#reintentos-seguros) · [Auditoría](#auditoría)
-
-**[Fuera de la petición](#fuera-de-la-petición)** — [Colas de trabajos](#colas-de-trabajos) · [Tareas periódicas](#tareas-periódicas) · [Cache](#cache) · [Llamar a otra API](#llamar-a-otra-api)
-
-**[Operación](#operación)** — [Configuración](#configuración) · [Configuración tipada](#configuración-tipada) · [Trazabilidad](#trazabilidad) · [Salud](#salud) · [Métricas](#métricas) · [OpenAPI automático](#openapi-automático) · [Recarga al guardar](#recarga-al-guardar)
-
-**Tu proyecto** — [Estructura](#estructura-de-un-proyecto) · [Tests](#tests-en-tu-proyecto) · [Comandos](#comandos)
-
-**El framework** — [Tests y CI](#tests-y-ci) · [Limitaciones](#limitaciones-conocidas) · [No-objetivos](#no-objetivos) · [Cómo funciona](#cómo-funciona)
+| | |
+|---|---|
+| **Empezar** | [Instalación](#instalación) · [El asistente de `syrax new`](#el-asistente-de-syrax-new) · [El camino de una petición](#el-camino-de-una-petición) |
+| **[La petición](#la-petición)** | [Errores como valores](#errores-como-valores) · [Validación](#validación) · [Paginación](#paginación) · [Serialización parcial](#serialización-parcial) · [ETag y 304](#etag-y-304) · [Archivos subidos](#archivos-subidos) · [WebSockets](#websockets) |
+| **[La base de datos](#la-base-de-datos)** | [Consultas y transacciones](#consultas-y-transacciones) · [Query builder tipado](#query-builder-tipado) · [Migraciones](#migraciones-en-c) · [Soft deletes y timestamps](#soft-deletes-y-timestamps) · [Multi-tenancy](#multi-tenancy) · [`Mapper<T>`](#y-si-quieres-mappert-puedes) |
+| **[Seguridad](#seguridad)** | [Middleware y políticas](#middleware-autenticación-y-políticas) · [Permisos finos](#permisos-finos) · [Tokens de otro proveedor](#tokens-de-otro-proveedor) · [Rate limiting](#rate-limiting) · [Reintentos seguros](#reintentos-seguros) · [Auditoría](#auditoría) |
+| **[Fuera de la petición](#fuera-de-la-petición)** | [Colas de trabajos](#colas-de-trabajos) · [Tareas periódicas](#tareas-periódicas) · [Cache](#cache) · [Llamar a otra API](#llamar-a-otra-api) |
+| **[Operación](#operación)** | [Configuración](#configuración) · [Configuración tipada](#configuración-tipada) · [Trazabilidad](#trazabilidad) · [Salud](#salud) · [Métricas](#métricas) · [OpenAPI](#openapi-automático) · [Recarga al guardar](#recarga-al-guardar) |
+| **Tu proyecto** | [Estructura](#estructura-de-un-proyecto) · [Tests](#tests-en-tu-proyecto) · [Comandos](#comandos) |
+| **El framework** | [Tests y CI](#tests-y-ci) · [Limitaciones conocidas](#limitaciones-conocidas) · [No-objetivos](#no-objetivos) · [Cómo funciona](#cómo-funciona) |
 
 ---
 

@@ -957,3 +957,38 @@ TEST_CASE("un modelo sin tenant no cambia en nada", "[query][tenant]") {
     // Sin el marcador no hay guardia ni filtro: el comportamiento de siempre.
     CHECK(drogon::sync_wait(Query<User>(db.get()).count()) == 4);
 }
+
+// --- la clave primaria tiene que estar en el struct para poder escribir ---
+
+namespace qtest {
+
+// Una proyeccion de solo lectura: sin id, a proposito. Es para lo que sirve
+// que las columnas salgan del struct.
+struct UserPublico {
+    std::string name;
+    std::string email;
+
+    static constexpr auto table = "users";
+};
+
+}  // namespace qtest
+
+// El predicado que gobierna el guardia de save() y remove(). Se comprueba en
+// compilacion porque es donde actua: un save() sobre un struct sin su clave
+// primaria no fallaria, se quedaria INSERTANDO una fila nueva cada vez.
+static_assert(syrax::detail::hasPrimaryKeyField<User>());
+static_assert(syrax::detail::hasPrimaryKeyField<Doc>());          // primaryKey = "doc_id"
+static_assert(!syrax::detail::hasPrimaryKeyField<UserPublico>());
+
+TEST_CASE("una proyeccion sin id se puede leer igual", "[query]") {
+    SqliteDialect dialect;
+    TempDb        db;
+
+    // Lo que NO esta en el struct no esta en el SELECT, asi que tampoco puede
+    // salir en un resource.
+    CHECK(Query<UserPublico>().toSql() == R"(SELECT "name", "email" FROM "users")");
+
+    const auto filas = drogon::sync_wait(Query<UserPublico>(db.get()).get());
+    REQUIRE(filas.size() == 4);
+    CHECK(filas[0].name == "ada");
+}

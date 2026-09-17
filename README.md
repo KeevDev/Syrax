@@ -643,6 +643,19 @@ co_await remove(u);
 
 La clave primaria es `id` salvo que declares otra: `static constexpr auto primaryKey = "doc_id";`.
 
+**Un struct sin la clave primaria se puede leer, pero no guardar.** Una proyección sin `id` es justo para lo que sirve que las columnas salgan del struct:
+
+```cpp
+struct UserPublico {
+    std::string name;
+    std::string email;
+    static constexpr auto table = "users";
+};
+// SELECT "name", "email" FROM "users"
+```
+
+Lo que no está en el struct no está en el `SELECT`, así que tampoco puede salir en un resource. Pero `save()` decide INSERT o UPDATE mirando si la clave viene a cero, y sin campo que mirar se quedaría **insertando una fila nueva cada vez, en silencio**. Por eso pasar una proyección así por `save()` o `remove()` no compila, y el error dice qué usar en su lugar: `Query<T>::update()` y `del()`, que filtran por `where`.
+
 Cuatro cosas que lo separan de escribir el `SELECT`:
 
 - **La columna se nombra con `&User::email`, no con un string.** Glaze resuelve el nombre en compilación comparando la dirección del miembro contra los campos que refleja, así que `&User::emial` **no compila** en vez de fallar en producción.
@@ -1625,7 +1638,7 @@ syrax test                     # en el repo de Syrax
 ctest --test-dir build         # equivalente
 ```
 
-388 casos cubriendo el generador de DDL en ambos dialectos, `ALTER TABLE` ejecutado contra SQLite real, el mapeo de filas a structs, el query builder contra SQLite real —SQL generado, `save`/`remove`, `update` masivo, paginación, enums, el `IN ()` vacío y que agrupar con `whereGroup` cambia qué filas vuelven—, las reglas de validación y su anotación del JSON Schema, la generación de OpenAPI, JWT y hashing de contraseñas, middlewares y políticas, la integración HTTP completa (ruteo, binding de body, 422 con detalle por campo, path params, corrutinas, el 404 y el 500 en JSON) y los WebSockets hablando el protocolo a mano contra el servidor real.
+389 casos cubriendo el generador de DDL en ambos dialectos, `ALTER TABLE` ejecutado contra SQLite real, el mapeo de filas a structs, el query builder contra SQLite real —SQL generado, `save`/`remove`, `update` masivo, paginación, enums, el `IN ()` vacío y que agrupar con `whereGroup` cambia qué filas vuelven—, las reglas de validación y su anotación del JSON Schema, la generación de OpenAPI, JWT y hashing de contraseñas, middlewares y políticas, la integración HTTP completa (ruteo, binding de body, 422 con detalle por campo, path params, corrutinas, el 404 y el 500 en JSON) y los WebSockets hablando el protocolo a mano contra el servidor real.
 
 CI en GitHub Actions, en cada push y PR:
 

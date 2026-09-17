@@ -15,6 +15,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -147,6 +148,52 @@ template <typename T>
 std::string primaryKeyOf() {
     if constexpr (HasPrimaryKey<T>) return std::string{T::primaryKey};
     else                            return "id";
+}
+
+// Lo mismo, en compilacion: lo de arriba devuelve std::string porque se
+// concatena con el SQL, y un std::string no vive en un static_assert.
+template <typename T>
+constexpr std::string_view primaryKeyName() {
+    if constexpr (HasPrimaryKey<T>) return std::string_view{T::primaryKey};
+    else                            return "id";
+}
+
+// Si el struct tiene el campo de su clave primaria.
+//
+// No tenerlo es perfectamente valido para LEER -una proyeccion sin el id es
+// justo para lo que sirve que las columnas salgan del struct-, pero save() y
+// remove() no pueden hacer nada sin el: save() decide INSERT o UPDATE mirando
+// si la clave viene a cero, y sin campo que mirar se quedaria insertando
+// siempre, en silencio y duplicando filas. Por eso esto se comprueba donde se
+// escribe, no donde se declara el modelo.
+template <typename T>
+constexpr bool hasPrimaryKeyField() {
+    constexpr auto keys    = glz::reflect<T>::keys;
+    constexpr auto primary = primaryKeyName<T>();
+
+    bool found = false;
+    [&]<std::size_t... I>(std::index_sequence<I...>) {
+        ([&] {
+            if (std::string_view{keys[I]} == primary) found = true;
+        }(), ...);
+    }(std::make_index_sequence<glz::reflect<T>::size>{});
+
+    return found;
+}
+
+// El mensaje de un static_assert tiene que ser un literal, asi que el guardia
+// va en una funcion en vez de en una constante: asi se escribe una sola vez y
+// los dos sitios que lo necesitan la llaman.
+template <typename T>
+constexpr void requirePrimaryKeyField() {
+    static_assert(hasPrimaryKeyField<T>(),
+                  "syrax: el modelo no tiene el campo de su clave primaria, asi que save() y "
+                  "remove() no pueden saber sobre que fila actuan: save() se quedaria "
+                  "insertando una fila nueva cada vez, en silencio. Para una proyeccion de "
+                  "solo lectura -un struct sin el id- eso esta bien, pero entonces no la "
+                  "pases por save() ni por remove(): para eso estan Query<T>::update() y "
+                  "del(), que filtran por where. Si la columna se llama de otra forma, "
+                  "declarala con `static constexpr auto primaryKey = \"doc_id\";`.");
 }
 
 // Postgres numera los parametros, sqlite usa '?' posicional. El builder no
@@ -1201,6 +1248,8 @@ private:
 // modelo no obliga a tocar esto.
 template <detail::HasTable T>
 drogon::Task<void> save(T& value, drogon::orm::DbClientPtr on = nullptr) {
+    detail::requirePrimaryKeyField<T>();
+
     const auto table   = detail::tableOf<T>();
     const auto primary = detail::primaryKeyOf<T>();
     auto       target  = on ? on : db::client();
@@ -1293,6 +1342,8 @@ drogon::Task<void> save(T& value, drogon::orm::DbClientPtr on = nullptr) {
 // Borra el objeto por su clave primaria. Devuelve si habia algo que borrar.
 template <detail::HasTable T>
 drogon::Task<bool> remove(const T& value, drogon::orm::DbClientPtr on = nullptr) {
+    detail::requirePrimaryKeyField<T>();
+
     const auto table   = detail::tableOf<T>();
     const auto primary = detail::primaryKeyOf<T>();
     auto       target  = on ? on : db::client();
